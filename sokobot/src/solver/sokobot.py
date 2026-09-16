@@ -1,10 +1,13 @@
 import time
 import numpy as np
+import heapq
 from scipy.optimize import linear_sum_assignment
 from collections import deque
 
+WEIGHT = 1
+
 def getHeuristic(boxCoordinates, goalState):
-    boxRows = np.array(boxCoordinates)
+    boxRows = np.array(tuple(boxCoordinates))
     goalRows = np.array(goalState)
 
     diff = np.abs(boxRows[:, None, :] - goalRows[None, :, :])
@@ -12,7 +15,7 @@ def getHeuristic(boxCoordinates, goalState):
 
     row, col = linear_sum_assignment(costMatrix)
 
-    return costMatrix[row, col].sum()
+    return costMatrix[row, col].sum() * WEIGHT
 
 
 def getDirection(playerFrom, playerTo, directions):
@@ -85,13 +88,17 @@ class SokoBot:
         'l': (0, -1),  # Left
         'r': (0, 1)    # Right
         }
-
-        frontier = deque([startState])
+        frontier = []
+        gValues = {startState: 0}
+        f = 0 + getHeuristic(boxCoordinates, goalState)
+        heapq.heappush(frontier, (f, 0, startState))
         explored = {startState}
         roadToSucess = {startState: None}
 
+        count = 0
         while frontier:
-            currentState = frontier.popleft()
+            currentState = heapq.heappop(frontier)[2]
+            print(f"Exploring state {count}: Player at {currentState[0]}, Boxes at {currentState[1]}")
             if isGoalState(currentState[1], goalState):
                 path = []
                 while roadToSucess[currentState] is not None:
@@ -101,10 +108,13 @@ class SokoBot:
                 return path
 
             for destRow, destCol in directions.values():
+                count += 1
                 newState = movePlayer(currentState[0], (destRow, destCol), currentState[1], mapData)
                 if newState is not None and newState not in explored:
                     explored.add(newState)
-                    frontier.append(newState)
+                    gValues[newState] = gValues[currentState] + 1
+                    f = gValues[newState] + getHeuristic(newState[1], goalState)
+                    heapq.heappush(frontier, (f, count, newState))
                     roadToSucess[newState] = currentState
         return None
 

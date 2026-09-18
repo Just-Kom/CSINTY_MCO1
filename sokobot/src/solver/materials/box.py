@@ -10,7 +10,3 @@ class Box:
 
     def get_id_tag(self):
         return self.id_tag
-
-    def set_coordinates(self, x, y):
-        self.x = x
-        self.y = y

@@ -4,120 +4,225 @@ import heapq
 from scipy.optimize import linear_sum_assignment
 from collections import deque
 
-WEIGHT = 1
+"""
+dest - Target coordinate on the grid
+Type: tuple (row, col)
 
-def getHeuristic(boxCoordinates, goalState):
-    boxRows = np.array(tuple(boxCoordinates))
-    goalRows = np.array(goalState)
+dest[0] - Row index (vertical, top is 0)
+Type: int
+Note: UP AND DOWN MOVEMENT
 
-    diff = np.abs(boxRows[:, None, :] - goalRows[None, :, :])
-    costMatrix = diff.sum(axis=2)
+dest[1] - Column index (horizontal, left is 0)
+Type: int
+Note: LEFT AND RIGHT MOVEMENT
 
-    row, col = linear_sum_assignment(costMatrix)
+playerCoordinate - Current location of the player
+Type: tuple (row, col)
 
-    return costMatrix[row, col].sum() * WEIGHT
+boxCoordinates - Current locations of all boxes
+Type: frozenset of tuples
 
+goalState - Winning target locations for boxes
+Type: frozenset of tuples
 
-def getDirection(playerFrom, playerTo, directions):
-    diffRow = playerTo[0] - playerFrom[0]
-    diffCol = playerTo[1] - playerFrom[1]
-    for direction, (dRow, dCol) in directions.items():
-        if (diffRow, diffCol) == (dRow, dCol):
-            return direction
+goalState[i] - Cant index, but each element is a tuple (row, col) representing a goal location
+Type: N/A
+Note: DO NOT INDEX
+
+deltaX - Row difference between dest and position
+Type: int
+
+deltaY - Column difference between dest and position
+Type: int
+
+DIRECTION - The 4 possible adjacent moves (row_change, col_change)
+Type: list of tuples
+Note: Used for iteration and expansion
+
+DIRECTIONS - Mapping of coordinate changes to output characters ('u', 'd', 'l', 'r')
+Type: dict
+Note: Used for outputting the solution path, for O(1) lookup
+"""
+
+DIRECTIONS = {
+    (0, -1): 'l',
+    (0, 1): 'r',
+    (1, 0): 'd',
+    (-1, 0):'u' 
+}
+
+DIRECTION = [
+    (0, -1),
+    (0, 1),
+    (1, 0),
+    (-1, 0)
+]
+
+def isValid(dest, mapData, width, height):
+    if dest[1] < 0 or dest[1] >= width or dest[0] < 0 or dest[0] >= height:
+        return False
+    if mapData[dest[0]][dest[1]] == '#':
+        return False
+    return True
+
+def isValidPull(dest, mapData, width, height):
+    # dest is the pos the player is moving into
+    # new dest is the pos the box is moving into
+    # a pull can only happen if the box and the player is still on the same column
+    # or if they are still on the same row
+    if dest[1] < 0 or dest[1] >= width or dest[0] < 0 or dest[0] >= height:
+        return False
+    if mapData[dest[0]][dest[1]] == '#':
+        return False
+    return True
+
+def movePlayerPull(playerCoordinate, dest, boxCoordinates, mapData, width, height):
+    deltaRow = dest[0] - playerCoordinate[0]
+    deltaCol = dest[1] - playerCoordinate[1]
+    # (deltaRow, deltaCol) is the direction the player is moving in
+    
+    # the box must move in the SAME direction as the player
+    deltaRowBox = playerCoordinate[0] - boxCoordinates[0]
+    deltaColBox = playerCoordinate[1] - boxCoordinates[1]
+    
+    # Only pull if the box and the player are moving in the same direction
+    if (deltaRow == deltaRowBox) and (deltaCol == deltaColBox):
+        if isValidPull(dest, mapData, width, height):
+            newPlayerCoordinate = dest
+            newBoxCoordinates = playerCoordinate
+            return (newPlayerCoordinate, newBoxCoordinates)
+            
     return None
 
-def isGoalState(boxCoordinates, goalState):
-    return set(boxCoordinates) == set(goalState)
 
-def isValidMove(dest, boxCoordinates, mapData):
-    row, col = dest
-    if row < 0 or row >= len(mapData) or col < 0 or col >= len(mapData[0]):
+def generateSimpleDeadlock(mapData, width, height, goalState, playerPos):
+    deadLockLookUp = np.full((height, width), True)
+    #Check if a box can be pulled from a goalstate to a certain tile
+    #BFS ALGO
+    #explored is now the deadLockLookUP
+    frontier = deque()
+    explored = set()
+    for Rowindex, goal in enumerate(goalState):
+        for Colindex, direction in enumerate(DIRECTION):
+            dest = (goal[0] + direction[0], goal[1] + direction[1])
+            if isValid(dest, mapData, width, height):
+                playerPosition = dest
+                boxPosition = goal
+                startState = (playerPosition, boxPosition)
+                frontier.append(startState)
+                explored.add(startState)
+
+    #we are trying to get the player to pull the 
+        while frontier:
+            currentState = frontier.popleft()
+            currentPlayerPos = currentState[0]
+            currentBoxCoords = currentState[1]
+            deadLockLookUp[currentBoxCoords[0]][currentBoxCoords[1]] = False
+            
+            # for each direction from the box, put the player in that direction and check if its valid
+            deltaRow =  currentPlayerPos[0] - currentBoxCoords[0]
+            deltaCol = currentPlayerPos[1] - currentBoxCoords[1]
+            # delta row and col is the direction of the player relative to the box
+            # we want to move the player 1 backwards
+            # the code below is the new state after moving the box
+            row = deltaRow
+            col = deltaCol
+            dest = (currentPlayerPos[0] + row, currentPlayerPos[1] + col)
+            newState = movePlayerPull(currentPlayerPos, dest, currentBoxCoords, mapData, width, height)
+            if newState is not None and newState not in explored:
+                explored.add(newState)
+                frontier.append(newState)
+            # the code below states that, in the current NEW coordinate of the box, we move the player to the 4 adjacent tiles around the box and check if its valid
+            for Colindex, direction in enumerate(DIRECTION):
+                destination = (currentBoxCoords[0] + direction[0], currentBoxCoords[1] + direction[1])
+                if isValid(destination, mapData, width, height):
+                    playerPosition = destination
+                    startState = (playerPosition, currentBoxCoords)
+                    if startState not in explored:
+                        frontier.append(startState)
+                        explored.add(startState)
+                        print(f"Current Player Pos: {playerPosition}, Current Box Coords: {currentBoxCoords}")
+                        print(f"Delta Row: {deltaRow}, Delta Col: {deltaCol}")
+                    
+    return deadLockLookUp
+
+def isValidMove(dest, boxCoordinates, mapData, width, height):
+    if dest[1] < 0 or dest[1] >= width or dest[0] < 0 or dest[0] >= height:
         return False
-    if mapData[row][col] == '#':
+    if mapData[dest[0]][dest[1]] == '#':
         return False
     if dest in boxCoordinates:
         return False
     return True
 
-# move player will create a new state based on the current state and the direction of movement. It will return None if the move is invalid, otherwise it will return a new state with the updated player and box coordinates. The new state is a tuple of (playerCoordinates, boxCoordinates)
-def movePlayer(playerCoordinates, direction, boxCoordinates, mapData):
-    row, col = playerCoordinates
-    diffRow, diffCol = direction
-    # if the player is trying to move into a box, check if the box can be pushed, so row + diffRow, col + diffCol is the current position of the box, and row + 2 * diffRow, col + 2 * diffCol is the position where the box will be pushed to
-    if (row + diffRow, col + diffCol) in boxCoordinates:
-        newBoxRow, newBoxCol = row + 2 * diffRow, col + 2 * diffCol
-        if not isValidMove((newBoxRow, newBoxCol), boxCoordinates, mapData):
-            return None
-        boxCoordinates = frozenset(newBox if newBox != (row + diffRow, col + diffCol) else (newBoxRow, newBoxCol) for newBox in boxCoordinates)
-        return ((row + diffRow, col + diffCol), boxCoordinates)
-    else:
-        if not isValidMove((row + diffRow, col + diffCol), boxCoordinates, mapData):
-            return None
-        return ((row + diffRow, col + diffCol), boxCoordinates)
+def movePlayer(playerCoordinate, dest, boxCoordinates, mapData, width, height, deadLockTable):
+    deltaX = dest[0] - playerCoordinate[0]
+    deltaY = dest[1] - playerCoordinate[1]
+    # player either moves into a box, or moves into an empty space
+    newDest = (dest[0] + deltaX, dest[1] + deltaY)
+    if dest in boxCoordinates and  isValidMove(newDest, boxCoordinates, mapData, width, height) and not deadLockTable[newDest[0]][newDest[1]]:
+        newPlayerCoordinate = dest
+        newBoxCoordinate = newDest
+        return (newPlayerCoordinate, frozenset(oldBox if oldBox != dest else newBoxCoordinate for oldBox in boxCoordinates))
+    elif isValidMove(dest, boxCoordinates, mapData, width, height):
+        newPlayerCoordinate = dest
+        return (newPlayerCoordinate, boxCoordinates)
+    return None
 
 class SokoBot:
     def solveSokobanPuzzle(self, width, height, mapData, itemsData):
-        # YOU NEED TO REWRITE THE IMPLEMENTATION OF THIS METHOD TO MAKE THE BOT SMARTER
-        # Default stupid behavior: Think (sleep) for 3 seconds, and then return a
-        # sequence
-        # that just moves left and right repeatedly.
-
-        #build a state first
-        playerCoordinates = ()
-        boxCoordinates = []
         goalState = []
-        for rowIndex, row in enumerate(itemsData):
-            for col, char in enumerate(row):
-                match char:
-                    case '@':
-                        playerCoordinates = (rowIndex, col)
-                    case '$':
-                        boxCoordinates.append((rowIndex, col))
+        for row,rowVal in enumerate(mapData):
+            for col,colVal in enumerate(rowVal):
+                if colVal == '.':
+                    goalState.append((row, col))
+        goalState = frozenset(goalState)
 
-        for rowIndex, row in enumerate(mapData):
-            for col, char in enumerate(row):
-                if char == '.':
-                    goalState.append((rowIndex, col))
+        boxCoordinates = []
+        for row,rowVal in enumerate(itemsData):
+            for col,colVal in enumerate(rowVal):
+                if colVal == '$':
+                    boxCoordinates.append((row, col))
+                elif colVal == '@':
+                    playerPosition = (row, col)
 
-        goalState = tuple(goalState)
-        startState = (playerCoordinates, frozenset(boxCoordinates))
-        #A single state is a tuple of 2 elements of playerCoordinates and boxCoordinates.
-        directions = {
-        'u': (-1, 0),   # Up 
-        'd': (1, 0),  # Down 
-        'l': (0, -1),  # Left
-        'r': (0, 1)    # Right
-        }
-        frontier = []
-        gValues = {startState: 0}
-        f = 0 + getHeuristic(boxCoordinates, goalState)
-        heapq.heappush(frontier, (f, 0, startState))
+        boxCoordinates = frozenset(boxCoordinates)
+        startState = (playerPosition, boxCoordinates)
+
+        frontier = deque()
+        paths = {startState: None}
+        frontier.append(startState)
         explored = {startState}
-        roadToSucess = {startState: None}
 
-        count = 0
+        deadLockTable = generateSimpleDeadlock(mapData, width, height, goalState, playerPosition)
+        print(deadLockTable)
+
         while frontier:
-            currentState = heapq.heappop(frontier)[2]
-            print(f"Exploring state {count}: Player at {currentState[0]}, Boxes at {currentState[1]}")
-            if isGoalState(currentState[1], goalState):
-                path = []
-                while roadToSucess[currentState] is not None:
-                    path.append(getDirection(roadToSucess[currentState][0], currentState[0], directions) if roadToSucess[currentState] is not None else None)
-                    currentState = roadToSucess[currentState]
-                path.reverse()
-                return path
+            currentState = frontier.popleft()
+            currentPlayerPos = currentState[0]
+            currentBoxCoords = currentState[1]
 
-            for destRow, destCol in directions.values():
-                count += 1
-                newState = movePlayer(currentState[0], (destRow, destCol), currentState[1], mapData)
+            if currentBoxCoords == goalState:
+                winPath = []
+                while currentState is not None:
+                    prevState = paths[currentState]
+                    if prevState is not None:
+                        winPath.append(DIRECTIONS[(currentState[0][0] - prevState[0][0], currentState[0][1] - prevState[0][1])])
+                    currentState = prevState
+                winPath.reverse()
+                return winPath
+                #loop to find path then return path
+            
+            for index,value in enumerate(DIRECTION):
+                row = value[0]
+                col = value[1]
+                dest = (currentPlayerPos[0] + row, currentPlayerPos[1] + col)
+                newState = movePlayer(currentPlayerPos, dest, currentBoxCoords, mapData, width, height, deadLockTable)
                 if newState is not None and newState not in explored:
                     explored.add(newState)
-                    gValues[newState] = gValues[currentState] + 1
-                    f = gValues[newState] + getHeuristic(newState[1], goalState)
-                    heapq.heappush(frontier, (f, count, newState))
-                    roadToSucess[newState] = currentState
-        return None
-
+                    paths[newState] = currentState
+                    frontier.append(newState)
+        return "l"
 
 
             

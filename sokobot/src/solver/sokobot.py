@@ -44,6 +44,12 @@ Type: dict
 Note: Used for outputting the solution path, for O(1) lookup
 """
 
+"""
+From JM: 
+Understood all functions except for the generating of deadlocks, lol.
+Pa-check nalang Aaron kapag tama HAHAHA
+"""
+
 DIRECTIONS = {
     (0, -1): 'l',
     (0, 1): 'r',
@@ -63,6 +69,9 @@ AXES = [
     [(1, 0), (-1, 0)]   # Y-axis (down and up)
 ]
 
+"""
+Where is this used tho?
+"""
 def hasFreezeSubset(boxCoordinates, mapData, width, height, freezeSubset):
     # freezeSubset is a set of boxes that are frozen, we want to check if any of the boxes in boxCoordinates are in freezeSubset
     for box in freezeSubset:
@@ -76,6 +85,18 @@ def detectBlockedAxes(boxCoordinate, mapData, width, height, deadLockTable, expl
     # explored is the set of all boxes that have been checked for frozen axes, so we dont check them again.
     # axes = [DIRECTION[2:], DIRECTION[:2]]
     # axisIndex 0 is the Y axis, axisIndex 1 is the X axis
+    # Additional (JM): Do note that this function is a recursive one
+    # JM # 2: the 'dest' here refers to an ADJACENT block of any given box, NOT the target goal
+    """
+    :param boxCoordinate:
+    :param mapData:
+    :param width:
+    :param height:
+    :param deadLockTable:
+    :param explored:
+    :param boxCoordinates:
+    :return:
+    """
 
     currentBox = boxCoordinate
     explored[currentBox] = [False, False]
@@ -91,15 +112,56 @@ def detectBlockedAxes(boxCoordinate, mapData, width, height, deadLockTable, expl
             # if the left or right of the box has a wall
             dest = (currentBox[0]+leftRight[0], currentBox[1]+leftRight[1])
             # if dest is out of bounds then just continue to the next direction
+            """
+            Equivalent to: checking for ArrayOutOfBoundsError
+            Something I noticed lang, we used this exact block for four times throughout the code. 
+            Do you think we can turn this into one method instead?
+            
+            if isOutOfBounds(dest[], height, width):
+                continue
+                
+            def isOutOfBounds(dest[], height, width):
+                if dest[1] < 0 or dest[1] >= width or dest[0] < 0 or dest[0] >= height:
+                    return True
+                else:
+                    return False
+            """
             if dest[1] < 0 or dest[1] >= width or dest[0] < 0 or dest[0] >= height:
                 continue
+            """
+            On First Iteration:
+            Equivalent to: checking a wall on the left or right
+            #$ - returns True
+            $# - return True
+            
+            #
+            $ - returns False
+            
+            On Second Iteration:
+            #
+            $ - return True
+            
+            $
+            # - returns True
+            
+            """
             if mapData[dest[0]][dest[1]] == '#':
                 # Is there a wall on the left or on the right side?
                 explored[currentBox][axisIndex] = True
-                #. Is there a simple deadlock square on the right and the left side? 
+
+
+            """
+            
+            """
+            # Is there a simple deadlock square on the right and the left side?
             if deadLockTable[dest[0]][dest[1]]:
                 numOfSimpleDeadlocks += 1
-                #Is there a box on the left or on the right side, which is already blocked?
+
+
+            """
+            Di ko rin nagets toh hahaha. I'll review it later. 
+            """
+            # Is there a box on the left or on the right side, which is already blocked?
             if dest in boxCoordinates:
                 if dest not in explored:
                     detectBlockedAxes(dest, mapData, width, height, deadLockTable, explored, boxCoordinates)
@@ -107,14 +169,15 @@ def detectBlockedAxes(boxCoordinate, mapData, width, height, deadLockTable, expl
                     # if both axes are blocked, then the current box is also blocked
                 if explored[dest][0] and explored[dest][1]:
                     explored[currentBox][axisIndex] = True
-            # return all of the boxes that are blocked on both axes, which means they are frozen and cannot be moved anymore
+
+        # return all of the boxes that are blocked on both axes, which means they are frozen and cannot be moved anymore
         if numOfSimpleDeadlocks == 2:
             explored[currentBox][axisIndex] = True
 
     return {box for box, blocked in explored.items() if blocked[0] and blocked[1]}
     
 
-
+#this seems to be the same function as the after one. Should we combine the two?
 def isValid(dest, mapData, width, height):
     if dest[1] < 0 or dest[1] >= width or dest[0] < 0 or dest[0] >= height:
         return False
@@ -122,6 +185,7 @@ def isValid(dest, mapData, width, height):
         return False
     return True
 
+#this seems to be the same function as the previous one. Should we combine the two?
 def isValidPull(dest, mapData, width, height):
     # dest is the pos the player is moving into
     # new dest is the pos the box is moving into
@@ -154,7 +218,7 @@ def movePlayerPull(playerCoordinate, dest, boxCoordinates, mapData, width, heigh
 
 def generateSimpleDeadlock(mapData, width, height, goalState, playerPos):
     deadLockLookUp = np.full((height, width), True)
-    #Check if a box can be pulled from a goalstate to a certain tile
+    #Check if a box can be pulled from a goal state to a certain tile
     #BFS ALGO
     #explored is now the deadLockLookUP
     frontier = deque()
@@ -201,11 +265,19 @@ def generateSimpleDeadlock(mapData, width, height, goalState, playerPos):
                     
     return deadLockLookUp
 
+"""
+Note: use this for a movement. This doesn't have boxes checking. 
+
+Suggestion, can be made simpler by utilizing isValid. 
+"""
 def isValidMove(dest, boxCoordinates, mapData, width, height):
+    #Out of bounds
     if dest[1] < 0 or dest[1] >= width or dest[0] < 0 or dest[0] >= height:
         return False
+    #If the place where the character/box is going is a wall
     if mapData[dest[0]][dest[1]] == '#':
         return False
+    #if the adjacent space is a box
     if dest in boxCoordinates:
         return False
     return True
@@ -251,6 +323,11 @@ def movePlayer(playerCoordinate, dest, boxCoordinates, mapData, width, height, d
 
 class SokoBot:
     def solveSokobanPuzzle(self, width, height, mapData, itemsData):
+
+        """
+        This block identifies the target destinations and places their coordinates onto the mapData.
+        It also turns the goalState into a frozzenset - a unique concept
+        """
         goalState = []
         for row,rowVal in enumerate(mapData):
             for col,colVal in enumerate(rowVal):
@@ -258,6 +335,11 @@ class SokoBot:
                     goalState.append((row, col))
         goalState = frozenset(goalState)
 
+        """
+        This block identifies the following:
+         1. box coordinates
+         2. player coordinates at this specific instance
+        """
         boxCoordinates = []
         for row,rowVal in enumerate(itemsData):
             for col,colVal in enumerate(rowVal):
@@ -265,30 +347,49 @@ class SokoBot:
                     boxCoordinates.append((row, col))
                 elif colVal == '@':
                     playerPosition = (row, col)
-
         boxCoordinates = frozenset(boxCoordinates)
         startState = (playerPosition, boxCoordinates)
 
+        """
+        The actual bfs algorithm. 
+        Frontier is a stack, but using a python "deque" collection as it is faster. 
+        Paths is a set in Python which can be appended and not. 
+        Explored is also a set in Python that is unordered. 
+        
+        
+        """
         frontier = deque()
         paths = {startState: None}
         frontier.append(startState)
         explored = {startState}
         freezeSubset = []
 
+        """
+        Generating the deadlock table
+        """
         deadLockTable = generateSimpleDeadlock(mapData, width, height, goalState, playerPosition)
 
+        # shorthand for "while may laman ang frontier":
         while frontier:
+            #known as pop the frontier in our discussions
             currentState = frontier.popleft()
+
+            #time to explore the state!
             currentPlayerPos = currentState[0]
             currentBoxCoords = currentState[1]
 
+            #if the current box coodinates align fully with goal state, consider it a win and invoke finding the win path.
             if currentBoxCoords == goalState:
                 winPath = []
                 while currentState is not None:
+                    #gets the currentState of each previous path, literally embedded per state
+                    #aka. per state has its previous state stored within it
                     prevState = paths[currentState]
+                    #it starts from destnation baliktad
                     if prevState is not None:
                         winPath.append(DIRECTIONS[(currentState[0][0] - prevState[0][0], currentState[0][1] - prevState[0][1])])
                     currentState = prevState
+                #it then reserveses the current state
                 winPath.reverse()
                 print(f"Total states explored: {len(explored)}")
                 return winPath
@@ -299,6 +400,7 @@ class SokoBot:
                 col = value[1]
                 dest = (currentPlayerPos[0] + row, currentPlayerPos[1] + col)
                 #def detectBlockedAxes(boxCoordinate, mapData, width, height, deadLockTable, explored, axes, boxCoordinates):
+                # movePlayer is where all of the shenanigans happens!
                 newState = movePlayer(currentPlayerPos, dest, currentBoxCoords, mapData, width, height, deadLockTable, freezeSubset, goalState)
                 if newState is not None and newState not in explored:
                     explored.add(newState)

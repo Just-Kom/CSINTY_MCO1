@@ -282,18 +282,22 @@ def generateDistanceMatrices(goalState, mapData, width, height, deadLockTable):
     return matrices
         #expand from the goalVal to the map     
 
-def calculateHeuristic(boxCoordinates, distanceMatrices, goalState):
-    #for every box to each goal, calculate it as boxIndex to goalIndex
-    # should change the 999999 to a better value of not reachable
-    costMatrix = np.full((len(boxCoordinates), len(goalState)), 999999)
-    for boxIndex, boxVal in enumerate(boxCoordinates):
-        for goalIndex, goalVal in enumerate(goalState):
-            currentMatrix = distanceMatrices[goalVal]
-            distance = currentMatrix[boxVal[0]][boxVal[1]]
-            if distance != -1:
-                costMatrix[boxIndex][goalIndex] = distance
+def buildDistanceStack(distanceMatrices, goalState):
+
+    distanceStack = np.stack([distanceMatrices[goalVal] for goalVal in goalState])
+    return np.where(distanceStack == -1, 999999, distanceStack)
+
+def calculateHeuristic(boxCoordinates, distanceMatrices, goalState, heuristicCache):
+    if boxCoordinates in heuristicCache:
+        return heuristicCache[boxCoordinates]
+
+    boxRows = [boxVal[0] for boxVal in boxCoordinates]
+    boxCols = [boxVal[1] for boxVal in boxCoordinates]
+    costMatrix = distanceMatrices[:, boxRows, boxCols].T
     row, col = linear_sum_assignment(costMatrix)
-    return costMatrix[row, col].sum()
+    heuristic = int(costMatrix[row, col].sum())
+    heuristicCache[boxCoordinates] = heuristic
+    return heuristic
 
 
 class SokoBot:
@@ -316,12 +320,14 @@ class SokoBot:
         deadLockTable = generateSimpleDeadlock(mapData, width, height, goalState, playerPosition)
 
         distances = generateDistanceMatrices(goalState, mapData, width, height, deadLockTable)
+        distanceStack = buildDistanceStack(distances, goalState)
+        heuristicCache = {}
 
         boxCoordinates = frozenset(boxCoordinates)
         startState = (playerPosition, boxCoordinates)
         stateCounter = 0
 
-        heuristic = calculateHeuristic(boxCoordinates, generateDistanceMatrices(goalState, mapData, width, height, deadLockTable), goalState)
+        heuristic = calculateHeuristic(boxCoordinates, distanceStack, goalState, heuristicCache)
         heapStartState = (heuristic, stateCounter, startState)
         stateCounter += 1
 
@@ -336,7 +342,6 @@ class SokoBot:
             currentState = currentHeapState[2]
             currentPlayerPos = currentState[0]
             currentBoxCoords = currentState[1]
-            currentCost = currentHeapState[1]
 
             if currentBoxCoords == goalState:
                 winPath = []
@@ -359,12 +364,8 @@ class SokoBot:
                 if newState is not None and newState not in explored:
                     explored.add(newState)
                     paths[newState] = currentState
-                    heuristic = calculateHeuristic(newState[1], distances, goalState)
-                    newCost= currentCost + 1
-                    heapStartState = (heuristic, newCost, newState)
+                    heuristic = calculateHeuristic(newState[1], distanceStack, goalState, heuristicCache)
+                    heapStartState = (heuristic, stateCounter, newState)
                     heapq.heappush(frontier, (heapStartState))
                     stateCounter += 1
         return "l"
-
-
-            

@@ -3,6 +3,7 @@ import numpy as np
 import heapq
 from scipy.optimize import linear_sum_assignment
 from collections import deque
+from collections import ChainMap
 
 """
 dest - Target coordinate on the grid
@@ -217,10 +218,10 @@ def movePlayer(playerCoordinate, dest, boxCoordinates, mapData, width, height, d
 
     # if player is pushing a box
     if dest in boxCoordinates:
-        # if pushing into a wall or something, dont prune
+        # if pushing into a wall or something, prune
         if not isValidMove(newDest, boxCoordinates, mapData, width, height):
             return None
-        # if moving into a simple deadlock prune
+        # if moving into a simple deadlock, prune
         if deadLockTable[newDest[0]][newDest[1]]:
             return None
 
@@ -249,6 +250,42 @@ def movePlayer(playerCoordinate, dest, boxCoordinates, mapData, width, height, d
     # if all else fails, return None
     return None
 
+def generateDistanceMatrices(goalState, mapData, width, height, deadLockTable):
+    #create goalState many matrices in a dict
+    matrices = {}
+
+    for goalIndex, goalVal in enumerate(goalState):
+        matrix = np.full((height, width), -1)
+
+        startState = (goalVal, 0)
+        matrix[goalVal[0]][goalVal[1]] = 0
+        frontier = deque()
+        frontier.append(startState)
+        explored = {goalVal}
+
+        while frontier:
+            currentState = frontier.popleft()
+            currentPos = currentState[0]
+            currentCtr = currentState[1]
+            for index,value in enumerate(DIRECTION):
+                row = value[0]
+                col = value[1]
+                dest = (currentPos[0] + row, currentPos[1] + col)
+                #def detectBlockedAxes(boxCoordinate, mapData, width, height, deadLockTable, explored, axes, boxCoordinates):
+                if isValid(dest, mapData, width, height) and deadLockTable[dest[0]][dest[1]] == False:
+                    if dest not in explored:
+                        explored.add(dest)
+                        newCtr = currentCtr + 1
+                        frontier.append((dest, newCtr))
+                        matrix[dest[0]][dest[1]] = newCtr
+        matrices[goalVal] = matrix
+    return matrices
+        #expand from the goalVal to the map     
+
+
+
+
+
 class SokoBot:
     def solveSokobanPuzzle(self, width, height, mapData, itemsData):
         goalState = []
@@ -276,6 +313,10 @@ class SokoBot:
         freezeSubset = []
 
         deadLockTable = generateSimpleDeadlock(mapData, width, height, goalState, playerPosition)
+        print(deadLockTable)
+
+        distances = generateDistanceMatrices(goalState, mapData, width, height, deadLockTable)
+        print(distances)
 
         while frontier:
             currentState = frontier.popleft()

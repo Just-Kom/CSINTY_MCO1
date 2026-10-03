@@ -282,8 +282,18 @@ def generateDistanceMatrices(goalState, mapData, width, height, deadLockTable):
     return matrices
         #expand from the goalVal to the map     
 
-
-
+def calculateHeuristic(boxCoordinates, distanceMatrices, goalState):
+    #for every box to each goal, calculate it as boxIndex to goalIndex
+    # should change the 999999 to a better value of not reachable
+    costMatrix = np.full((len(boxCoordinates), len(goalState)), 999999)
+    for boxIndex, boxVal in enumerate(boxCoordinates):
+        for goalIndex, goalVal in enumerate(goalState):
+            currentMatrix = distanceMatrices[goalVal]
+            distance = currentMatrix[boxVal[0]][boxVal[1]]
+            if distance != -1:
+                costMatrix[boxIndex][goalIndex] = distance
+    row, col = linear_sum_assignment(costMatrix)
+    return costMatrix[row, col].sum()
 
 
 class SokoBot:
@@ -303,25 +313,30 @@ class SokoBot:
                 elif colVal == '@':
                     playerPosition = (row, col)
 
+        deadLockTable = generateSimpleDeadlock(mapData, width, height, goalState, playerPosition)
+
+        distances = generateDistanceMatrices(goalState, mapData, width, height, deadLockTable)
+
         boxCoordinates = frozenset(boxCoordinates)
         startState = (playerPosition, boxCoordinates)
+        stateCounter = 0
 
-        frontier = deque()
+        heuristic = calculateHeuristic(boxCoordinates, generateDistanceMatrices(goalState, mapData, width, height, deadLockTable), goalState)
+        heapStartState = (heuristic, stateCounter, startState)
+        stateCounter += 1
+
+        frontier = []
         paths = {startState: None}
-        frontier.append(startState)
+        heapq.heappush(frontier, (heapStartState))
         explored = {startState}
         freezeSubset = []
 
-        deadLockTable = generateSimpleDeadlock(mapData, width, height, goalState, playerPosition)
-        print(deadLockTable)
-
-        distances = generateDistanceMatrices(goalState, mapData, width, height, deadLockTable)
-        print(distances)
-
         while frontier:
-            currentState = frontier.popleft()
+            currentHeapState = heapq.heappop(frontier)
+            currentState = currentHeapState[2]
             currentPlayerPos = currentState[0]
             currentBoxCoords = currentState[1]
+            currentCost = currentHeapState[1]
 
             if currentBoxCoords == goalState:
                 winPath = []
@@ -344,7 +359,11 @@ class SokoBot:
                 if newState is not None and newState not in explored:
                     explored.add(newState)
                     paths[newState] = currentState
-                    frontier.append(newState)
+                    heuristic = calculateHeuristic(newState[1], distances, goalState)
+                    newCost= currentCost + 1
+                    heapStartState = (heuristic, newCost, newState)
+                    heapq.heappush(frontier, (heapStartState))
+                    stateCounter += 1
         return "l"
 
 

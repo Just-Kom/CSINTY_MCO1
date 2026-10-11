@@ -71,7 +71,7 @@ def hasFreezeSubset(boxCoordinates, mapData, width, height, freezeSubset):
             return True
     return False
 
-def detectBlockedAxes(boxCoordinate, mapData, width, height, deadLockTable, explored, boxCoordinates):
+def detectBlockedAxes(boxCoordinate, mapData, width, height, deadLockTable, explored, boxCoordinates, exploring):
     # Turn the boxcoords into a dict, each boxcoord value is (False,False) where (Y-axis, X-Axis)
     # iboxcoordinate is just 1 coordinate, the a pushed box, were just checking its surroundings to check if its a frozen box.
     # explored is the set of all boxes that have been checked for frozen axes, so we dont check them again.
@@ -79,6 +79,7 @@ def detectBlockedAxes(boxCoordinate, mapData, width, height, deadLockTable, expl
     # axisIndex 0 is the Y axis, axisIndex 1 is the X axis
 
     currentBox = boxCoordinate
+    exploring.add(currentBox)
     explored[currentBox] = [False, False]
     # the axes is just a list of 2 lists, each list contains the 2 directions of a single axis.
     # a single axis looks like this  (0, -1), (0, 1) which represents the left and right of the box at the x axis.
@@ -89,7 +90,6 @@ def detectBlockedAxes(boxCoordinate, mapData, width, height, deadLockTable, expl
         #check the left and right
         for __,leftRight in enumerate(axis):
             #left right is a tuple (row, col)
-            # if the left or right of the box has a wall
             dest = (currentBox[0]+leftRight[0], currentBox[1]+leftRight[1])
             # if dest is out of bounds then just continue to the next direction
             if dest[1] < 0 or dest[1] >= width or dest[0] < 0 or dest[0] >= height:
@@ -103,15 +103,15 @@ def detectBlockedAxes(boxCoordinate, mapData, width, height, deadLockTable, expl
                 #Is there a box on the left or on the right side, which is already blocked?
             if dest in boxCoordinates:
                 if dest not in explored:
-                    detectBlockedAxes(dest, mapData, width, height, deadLockTable, explored, boxCoordinates)
+                    detectBlockedAxes(dest, mapData, width, height, deadLockTable, explored, boxCoordinates, exploring)
                     # if the box on the left or right side is blocked, then the current box is also blocked on that axis
                     # if both axes are blocked, then the current box is also blocked
-                if explored[dest][0] and explored[dest][1]:
+                if explored[dest][1- axisIndex] or dest in exploring:
                     explored[currentBox][axisIndex] = True
             # return all of the boxes that are blocked on both axes, which means they are frozen and cannot be moved anymore
         if numOfSimpleDeadlocks == 2:
             explored[currentBox][axisIndex] = True
-
+    exploring.remove(currentBox)
     return {box for box, blocked in explored.items() if blocked[0] and blocked[1]}
     
 
@@ -228,21 +228,22 @@ def movePlayer(playerCoordinate, dest, boxCoordinates, mapData, width, height, d
         # hypothetical situation where we already pushed the box
         newBoxCoordinates = frozenset(boxCoordinates - {dest} | {newDest})
 
-        """"
+        
         # if we already know that its a frozen box, then prune
         if hasFreezeSubset(newBoxCoordinates, mapData, width, height, freezeSubset):
             return None
 
         # else, check if the move we just did causes a frozen box, if it does, then add it to the freezeSubset and prune
         freezeExplored = dict()
-        frozenBoxes = detectBlockedAxes(newDest, mapData, width, height, deadLockTable, freezeExplored, newBoxCoordinates)
+        exploring = set()
+        frozenBoxes = detectBlockedAxes(newDest, mapData, width, height, deadLockTable, freezeExplored, newBoxCoordinates, exploring)
         # if the box is frozen, add it to the list of patterns then prune
         if newDest in frozenBoxes:
-            if any(box in goalState for box in frozenBoxes):
+            if any(box not in goalState for box in frozenBoxes):
                 freezeSubset.append(frozenset(frozenBoxes))
                 return None 
         # else, the box is not frozen, so continue
-        """
+        
         return (dest, newBoxCoordinates)
     # else the player is just moving to an empty space
     elif isValidMove(dest, boxCoordinates, mapData, width, height):
@@ -352,6 +353,8 @@ class SokoBot:
                     currentState = prevState
                 winPath.reverse()
                 print(f"Total states explored: {len(explored)}")
+                distinct = {state[1] for state in explored}
+                print(f"Total unique box configurations explored: {len(distinct)}")
                 return winPath
                 #loop to find path then return path
             

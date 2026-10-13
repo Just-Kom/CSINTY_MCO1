@@ -300,40 +300,44 @@ def calculateHeuristic(boxCoordinates, distanceMatrices, goalState, heuristicCac
     heuristicCache[boxCoordinates] = heuristic
     return heuristic
 
-#For feature vector
-#Basically just ms paint bucket
-def countRegions(mapData, width, height, boxes):
-    explored = set()
-    rooms = 0
 
-    #For every single node in the map
-    for row in range(height):
-        for col in range(width):
-            currentPos = (row, col)
-            
-            #If its a wall, a box, or already explored, then skip it
-            if not isValid(currentPos, mapData, width, height) or currentPos in boxes or currentPos in explored:
+def reachablePlayerTiles(playerPosition, boxCoordinates, mapData, width, height):
+    #BFS of all tiles the player can walk to without pushing a box.
+    frontier = deque([playerPosition])
+    reachable = {playerPosition}
+    while frontier:
+        current = frontier.popleft()
+        for dr, dc in DIRECTION:
+            dest = (current[0] + dr, current[1] + dc)
+            if dest not in reachable and isValidMove(dest, boxCoordinates, mapData, width, height):
+                reachable.add(dest)
+                frontier.append(dest)
+    return reachable
+
+
+def findWalkingPath(start, destination, boxCoordinates, mapData, width, height):
+    #Find the shortest sequence of walking moves with the boxes fixed.
+    if start == destination:
+        return []
+    frontier = deque([start])
+    parents = {start: None}
+    while frontier:
+        current = frontier.popleft()
+        for dr, dc in DIRECTION:
+            dest = (current[0] + dr, current[1] + dc)
+            if dest in parents or not isValidMove(dest, boxCoordinates, mapData, width, height):
                 continue
+            parents[dest] = (current, DIRECTIONS[(dr, dc)])
+            if dest == destination:
+                path = []
+                while dest != start:
+                    previous, move = parents[dest]
+                    path.append(move)
+                    dest = previous
+                return path[::-1]
+            frontier.append(dest)
+    return None
 
-            #Else, new "room" so basically fill the reigon then increment our room counter
-            rooms += 1
-            
-            #everything below is just standard flood fill bfs
-            frontier = [currentPos]
-            explored.add(currentPos)
-
-            while frontier:
-                currentRow, currentCol = frontier.pop(0)
-
-                for rowY, colX in DIRECTION:
-                    dest = (currentRow + rowY, currentCol + colX)
-                    
-                    if isValid(dest, mapData, width, height) and dest not in boxes and dest not in explored:
-                        explored.add(dest)
-                        frontier.append(dest)
-                        
-    # Return the number of rooms found
-    return rooms
 
 class SokoBot:
     def solveSokobanPuzzle(self, width, height, mapData, itemsData):
@@ -353,56 +357,83 @@ class SokoBot:
                     playerPosition = (row, col)
 
         deadLockTable = generateSimpleDeadlock(mapData, width, height, goalState, playerPosition)
-
+        
         distances = generateDistanceMatrices(goalState, mapData, width, height, deadLockTable)
         distanceStack = buildDistanceStack(distances, goalState)
         heuristicCache = {}
-
-        boxCoordinates = frozenset(boxCoordinates)
-        startState = (playerPosition, boxCoordinates)
-        stateCounter = 0
-
-        heuristic = calculateHeuristic(boxCoordinates, distanceStack, goalState, heuristicCache)
-        heapStartState = (heuristic, stateCounter, startState)
-        stateCounter += 1
-
-        frontier = []
-        paths = {startState: None}
-        heapq.heappush(frontier, (heapStartState))
-        explored = {startState}
         freezeSubset = []
 
+       
+        startState = (playerPosition, boxCoordinates)
+        startReachable = reachablePlayerTiles(playerPosition, boxCoordinates, mapData, width, height)
+
+        def stateKey(state, reachable):
+            return (min(reachable), state[1])
+
+        startKey = stateKey(startState, startReachable)
+        stateByKey = {startKey: startState}
+        
+        parents = {startKey: None}
+        explored = {startKey}
+        frontier = []
+        stateCounter = 0
+        heuristic = calculateHeuristic(boxCoordinates, distanceStack, goalState, heuristicCache)
+        heapq.heappush(frontier, (heuristic, stateCounter, startKey))
+        stateCounter += 1
+
         while frontier:
-            currentHeapState = heapq.heappop(frontier)
-            currentState = currentHeapState[2]
-            currentPlayerPos = currentState[0]
-            currentBoxCoords = currentState[1]
+            _, _, currentKey = heapq.heappop(frontier)
+            currentPlayerPos, currentBoxCoords = stateByKey[currentKey]
 
             if currentBoxCoords == goalState:
+                transitions = []
+                key = currentKey
+                while parents[key] is not None:
+                    previousKey, standingTile, pushDirection = parents[key]
+                    transitions.append((previousKey, standingTile, pushDirection))
+                    key = previousKey
+                transitions.reverse()
+
                 winPath = []
-                while currentState is not None:
-                    prevState = paths[currentState]
-                    if prevState is not None:
-                        winPath.append(DIRECTIONS[(currentState[0][0] - prevState[0][0], currentState[0][1] - prevState[0][1])])
-                    currentState = prevState
-                winPath.reverse()
-                #print(f"Total states explored: {len(explored)}")
-                distinct = {state[1] for state in explored}
-                #print(f"Total unique box configurations explored: {len(distinct)}")
+                for previousKey, standingTile, pushDirection in transitions:
+                    previousPlayer, previousBoxes = stateByKey[previousKey]
+                    walk = findWalkingPath(
+                        previousPlayer, standingTile, previousBoxes, mapData, width, height
+                    )
+                    if walk is None:
+                        raise RuntimeError('Invalid reconstructed push path')
+                    winPath.extend(walk)
+                    winPath.append(DIRECTIONS[pushDirection])
+
+                print(f"Total states explored: {len(explored)}")
+                distinct = {key[1] for key in explored}
+                print(f"Total unique box configurations explored: {len(distinct)}")
                 return winPath
-                #loop to find path then return path
-            
-            for index,value in enumerate(DIRECTION):
-                row = value[0]
-                col = value[1]
-                dest = (currentPlayerPos[0] + row, currentPlayerPos[1] + col)
-                #def detectBlockedAxes(boxCoordinate, mapData, width, height, deadLockTable, explored, axes, boxCoordinates):
-                newState = movePlayer(currentPlayerPos, dest, currentBoxCoords, mapData, width, height, deadLockTable, freezeSubset, goalState)
-                if newState is not None and newState not in explored:
-                    explored.add(newState)
-                    paths[newState] = currentState
+
+            reachable = reachablePlayerTiles(
+                currentPlayerPos, currentBoxCoords, mapData, width, height
+            )
+
+            for box in currentBoxCoords:
+                for dr, dc in DIRECTION:
+                    standingTile = (box[0] - dr, box[1] - dc)
+                    boxDestination = (box[0] + dr, box[1] + dc)
+                    if standingTile not in reachable:
+                        continue
+                    if not isValidMove(boxDestination, currentBoxCoords, mapData, width, height):
+                        continue
+                    newState = movePlayer( standingTile, box, currentBoxCoords, mapData, width, height, deadLockTable, freezeSubset, goalState)
+                    if newState is None:
+                        continue
+                    newReachable = reachablePlayerTiles(newState[0], newState[1], mapData, width, height)
+                    newKey = stateKey(newState, newReachable)
+                    if newKey in explored:
+                        continue
+                    explored.add(newKey)
+                    parents[newKey] = (currentKey, standingTile, (dr, dc))
+                    stateByKey[newKey] = newState
                     heuristic = calculateHeuristic(newState[1], distanceStack, goalState, heuristicCache)
-                    heapStartState = (heuristic, stateCounter, newState)
-                    heapq.heappush(frontier, (heapStartState))
+                    heapq.heappush(frontier, (heuristic, stateCounter, newKey))
                     stateCounter += 1
-        return "l"
+
+        return []

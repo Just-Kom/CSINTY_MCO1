@@ -75,7 +75,7 @@ def detectBlockedAxes(boxCoordinate, mapData, width, height, deadLockTable, expl
     # Turn the boxcoords into a dict, each boxcoord value is (False,False) where (Y-axis, X-Axis)
     # iboxcoordinate is just 1 coordinate, the a pushed box, were just checking its surroundings to check if its a frozen box.
     # explored is the set of all boxes that have been checked for frozen axes, so we dont check them again.
-    # axes = [DIRECTION[2:], DIRECTION[:2]]
+    # axes = [DIRECTION[2:], DIRECTION[:2]
     # axisIndex 0 is the Y axis, axisIndex 1 is the X axis
 
     currentBox = boxCoordinate
@@ -300,6 +300,40 @@ def calculateHeuristic(boxCoordinates, distanceMatrices, goalState, heuristicCac
     heuristicCache[boxCoordinates] = heuristic
     return heuristic
 
+#For feature vector
+#Basically just ms paint bucket
+def countRegions(mapData, width, height, boxes):
+    explored = set()
+    rooms = 0
+
+    #For every single node in the map
+    for row in range(height):
+        for col in range(width):
+            currentPos = (row, col)
+            
+            #If its a wall, a box, or already explored, then skip it
+            if not isValid(currentPos, mapData, width, height) or currentPos in boxes or currentPos in explored:
+                continue
+
+            #Else, new "room" so basically fill the reigon then increment our room counter
+            rooms += 1
+            
+            #everything below is just standard flood fill bfs
+            frontier = [currentPos]
+            explored.add(currentPos)
+
+            while frontier:
+                currentRow, currentCol = frontier.pop(0)
+
+                for rowY, colX in DIRECTION:
+                    dest = (currentRow + rowY, currentCol + colX)
+                    
+                    if isValid(dest, mapData, width, height) and dest not in boxes and dest not in explored:
+                        explored.add(dest)
+                        frontier.append(dest)
+                        
+    # Return the number of rooms found
+    return rooms
 
 class SokoBot:
     def solveSokobanPuzzle(self, width, height, mapData, itemsData):
@@ -352,9 +386,9 @@ class SokoBot:
                         winPath.append(DIRECTIONS[(currentState[0][0] - prevState[0][0], currentState[0][1] - prevState[0][1])])
                     currentState = prevState
                 winPath.reverse()
-                print(f"Total states explored: {len(explored)}")
+                #print(f"Total states explored: {len(explored)}")
                 distinct = {state[1] for state in explored}
-                print(f"Total unique box configurations explored: {len(distinct)}")
+                #print(f"Total unique box configurations explored: {len(distinct)}")
                 return winPath
                 #loop to find path then return path
             

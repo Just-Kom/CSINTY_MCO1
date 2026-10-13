@@ -300,6 +300,38 @@ def calculateHeuristic(boxCoordinates, distanceMatrices, goalState, heuristicCac
     heuristicCache[boxCoordinates] = heuristic
     return heuristic
 
+def countRegions(mapData, width, height, boxes):
+    explored = set()
+    rooms = 0
+
+    #For every single node in the map
+    for row in range(height):
+        for col in range(width):
+            currentPos = (row, col)
+            
+            #If its a wall, a box, or already explored, then skip it
+            if not isValid(currentPos, mapData, width, height) or currentPos in boxes or currentPos in explored:
+                continue
+
+            #Else, new "room" so basically fill the reigon then increment our room counter
+            rooms += 1
+            
+            #everything below is just standard flood fill bfs
+            frontier = [currentPos]
+            explored.add(currentPos)
+
+            while frontier:
+                currentRow, currentCol = frontier.pop(0)
+
+                for rowY, colX in DIRECTION:
+                    dest = (currentRow + rowY, currentCol + colX)
+                    
+                    if isValid(dest, mapData, width, height) and dest not in boxes and dest not in explored:
+                        explored.add(dest)
+                        frontier.append(dest)
+                        
+    # Return the number of rooms found
+    return rooms
 
 def reachablePlayerTiles(playerPosition, boxCoordinates, mapData, width, height):
     #BFS of all tiles the player can walk to without pushing a box.

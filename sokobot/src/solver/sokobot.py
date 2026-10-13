@@ -395,7 +395,7 @@ class SokoBot:
         heuristicCache = {}
         freezeSubset = []
 
-       
+        boxCoordinates = frozenset(boxCoordinates)
         startState = (playerPosition, boxCoordinates)
         startReachable = reachablePlayerTiles(playerPosition, boxCoordinates, mapData, width, height)
 

@@ -440,7 +440,7 @@ class SokoBot:
                 print(f"Total states explored: {len(explored)}")
                 distinct = {key[1] for key in explored}
                 print(f"Total unique box configurations explored: {len(distinct)}")
-                return winPath
+                return ''.join(winPath)
 
             reachable = reachablePlayerTiles(
                 currentPlayerPos, currentBoxCoords, mapData, width, height

@@ -330,6 +330,7 @@ def countRegions(mapData, width, height, boxes):
 def reachablePlayerTiles(playerPosition, boxCoordinates, walls):
     frontier = deque([playerPosition])
     reachable = {playerPosition}
+    minimumCell = playerPosition
     while frontier:
         current = frontier.popleft()
         for destRow, destCol in DIRECTION:
@@ -337,7 +338,9 @@ def reachablePlayerTiles(playerPosition, boxCoordinates, walls):
             if dest not in reachable and dest not in walls and dest not in boxCoordinates:
                 reachable.add(dest)
                 frontier.append(dest)
-    return reachable
+                if dest < minimumCell:
+                    minimumCell = dest
+    return reachable, minimumCell
 
 def getCorralFromTile(startPos, reachable, boxCoordinates, walls, width, height):
     frontier = deque([startPos])
@@ -440,14 +443,14 @@ class SokoBot:
         freezeSubset = set()
 
         boxCoordinates = frozenset(boxCoordinates)
-        interiorTiles = reachablePlayerTiles(playerPosition, frozenset(), walls)
-        startReachable = reachablePlayerTiles(playerPosition, boxCoordinates, walls)
+        interiorTiles, _ = reachablePlayerTiles(playerPosition, frozenset(), walls)
+        startReachable, startMinimum = reachablePlayerTiles(playerPosition, boxCoordinates, walls)
         startState = (playerPosition, boxCoordinates, startReachable)
 
-        def stateKey(state, reachable):
-            return (min(reachable), state[1])
+        def stateKey(state, minimumCell):
+            return (minimumCell, state[1])
 
-        startKey = stateKey(startState, startReachable)
+        startKey = stateKey(startState, startMinimum)
         stateByKey = {startKey: startState}
         
         parents = {startKey: None}
@@ -566,7 +569,7 @@ class SokoBot:
                             freezeSubset.add(frozenset(frozenBoxes))
                         continue
 
-                    newReachable = reachablePlayerTiles(newState[0], newState[1], walls)
+                    newReachable, newMinimum = reachablePlayerTiles(newState[0], newState[1], walls)
 
                     #if the boxes positions have not been seen before
                     if newBoxCoords not in exploredReigons:
@@ -575,7 +578,7 @@ class SokoBot:
                     exploredReigons[newBoxCoords].append(newReachable)
 
                     newState = (newState[0], newState[1], newReachable)
-                    newKey = stateKey(newState, newReachable)
+                    newKey = stateKey(newState, newMinimum)
   
                     explored.add(newKey)
                     parents[newKey] = (currentKey, standingTile, (destRow, destCol))

@@ -383,6 +383,23 @@ def findWalkingPath(start, destination, boxCoordinates, walls):
             frontier.append(dest)
     return None
 
+def detectTunnelSquares(interiorTiles, goalState, walls):
+    tunnel_squares = set()
+    for tile in interiorTiles:
+        for deltaRow, deltaCol in DIRECTION:
+            prevTile = (tile[0] - deltaRow, tile[1] - deltaCol)
+            sideRow, sideCol = -deltaCol, deltaRow
+            tile_sides = (
+                (tile[0] + sideRow, tile[1] + sideCol),
+                (tile[0] - sideRow, tile[1] - sideCol)
+            )
+            prev_sides = (
+                (prevTile[0] + sideRow, prevTile[1] + sideCol),
+                (prevTile[0] - sideRow, prevTile[1] - sideCol)
+            )
+            if prevTile in interiorTiles and tile not in goalState and all(side in walls for side in tile_sides) and all(side in walls for side in prev_sides):
+                tunnel_squares.add((tile, (deltaRow, deltaCol)))
+    return tunnel_squares
 
 class SokoBot:
     def solveSokobanPuzzle(self, width, height, mapData, itemsData):
@@ -436,6 +453,7 @@ class SokoBot:
         heuristicCache = {}
         startReachable, startMinimum = reachablePlayerTiles(playerPosition, boxCoordinates, neighbors)
         startState = (playerPosition, boxCoordinates, startReachable)
+        tunnelTiles = detectTunnelSquares(interiorTiles, goalState, walls)
 
         def stateKey(state, minimumCell):
             return (minimumCell, state[1])
@@ -460,13 +478,13 @@ class SokoBot:
                 transitions = []
                 key = currentKey
                 while parents[key] is not None:
-                    previousKey, standingTile, pushDirection = parents[key]
-                    transitions.append((previousKey, standingTile, pushDirection))
+                    previousKey, standingTile, pushDirection, pushCount = parents[key]
+                    transitions.append((previousKey, standingTile, pushDirection, pushCount))
                     key = previousKey
                 transitions.reverse()
 
                 winPath = []
-                for previousKey, standingTile, pushDirection in transitions:
+                for previousKey, standingTile, pushDirection, pushCount in transitions:
                     previousPlayer, previousBoxes, idc = stateByKey[previousKey]
                     walk = findWalkingPath(
                         previousPlayer, standingTile, previousBoxes, walls
@@ -474,7 +492,7 @@ class SokoBot:
                     if walk is None:
                         raise RuntimeError('Invalid reconstructed push path')
                     winPath.extend(walk)
-                    winPath.append(DIRECTIONS[pushDirection])
+                    winPath.append(DIRECTIONS[pushDirection]*pushCount)
 
                 print(f"Total states explored: {len(explored)}")
                 distinct = {key[1] for key in explored}
@@ -532,9 +550,22 @@ class SokoBot:
                     if boxDestination not in validBoxTiles or boxDestination in currentBoxCoords:
                         continue
 
-                    #after the push the player ends up where the box was
-                    newPlayerPos = box
-                    newBoxCoords = (currentBoxCoords - {box}) | {boxDestination}
+                    newPlayerPos, newBoxCoords = newState
+                    pushDirection = (destRow, destCol)
+                    pushCount = 1
+                    movingBox = boxDestination
+                    while (movingBox, pushDirection) in tunnelTiles:
+                        nextBox = (movingBox[0] + destRow, movingBox[1] + destCol)
+                        if nextBox in walls or nextBox in newBoxCoords:
+                            break
+                        if deadLockTable[nextBox[0]][nextBox[1]]:
+                            break
+                        newBoxCoords = frozenset(newBoxCoords - {movingBox} | {nextBox})
+                        newPlayerPos = movingBox
+                        movingBox = nextBox
+                        pushCount += 1
+                    newState = (newPlayerPos, newBoxCoords)
+                    boxDestination = movingBox
 
                     alreadyExplored = False
                     #if the boxes positions have been seen before
@@ -580,7 +611,7 @@ class SokoBot:
                     newKey = stateKey(newState, newMinimum)
   
                     explored.add(newKey)
-                    parents[newKey] = (currentKey, standingTile, (destRow, destCol))
+                    parents[newKey] = (currentKey, standingTile, (destRow, destCol), pushCount)
                     stateByKey[newKey] = newState
 
                     #negative counter so ties pop the newest state first, keeps following 1 push line instead of jumping around

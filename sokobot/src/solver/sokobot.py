@@ -4,6 +4,7 @@ import heapq
 from scipy.optimize import linear_sum_assignment
 from collections import deque
 from collections import ChainMap
+from collections import defaultdict
 
 """
 dest - Target coordinate on the grid
@@ -64,10 +65,11 @@ AXES = [
     [(1, 0), (-1, 0)]   # Y-axis (down and up)
 ]
 
-def hasFreezeSubset(boxCoordinates, mapData, width, height, freezeSubset):
-    # freezeSubset is a set of boxes that are frozen, we want to check if any of the boxes in boxCoordinates are in freezeSubset
-    for box in freezeSubset:
-        if box.issubset(boxCoordinates):
+def hasFreezeSubset(boxDestination, boxCoordinates, freezeSubset):
+    # freezeSubset maps a tile to every frozen set of boxes that has a box on that tile
+    # the parent state wasnt frozen, so any new freeze has to include the box we just pushed
+    for subset in freezeSubset.get(boxDestination, ()):
+        if subset.issubset(boxCoordinates):
             return True
     return False
 
@@ -78,13 +80,12 @@ def detectBlockedAxes(boxCoordinate, mapData, width, height, deadLockTable, expl
         if currentBox in exploring:
             return True
 
-        savedExplored = explored.copy()
-        exploring.add(currentBox)
         blockedAxes = [False, False]
+        adjBoxesPerAxis = [[], []]
 
+        #check the walls, simple deadlocks and boxes on both axes first before recursing into anything
         for axisIndex, axis in enumerate(AXES):
             numOfSimpleDeadlocks = 0
-            adjBoxes = []
 
             for deltaRow, deltaCol in axis:
                 dest = (currentBox[0] + deltaRow, currentBox[1] + deltaCol)
@@ -99,11 +100,20 @@ def detectBlockedAxes(boxCoordinate, mapData, width, height, deadLockTable, expl
                     if dest in exploring:
                         blockedAxes[axisIndex] = True
                         break
-                    adjBoxes.append(dest)
+                    adjBoxesPerAxis[axisIndex].append(dest)
 
             if not blockedAxes[axisIndex] and numOfSimpleDeadlocks == 2:
                 blockedAxes[axisIndex] = True
 
+            #if this axis is open and theres no box beside it, the box can still move so its not frozen
+            if not blockedAxes[axisIndex] and not adjBoxesPerAxis[axisIndex]:
+                explored[currentBox] = False
+                return False
+
+        savedExplored = explored.copy()
+        exploring.add(currentBox)
+
+        for axisIndex, adjBoxes in enumerate(adjBoxesPerAxis):
             if not blockedAxes[axisIndex]:
                 for adjBox in adjBoxes:
                     if isFrozen(adjBox):
@@ -212,39 +222,6 @@ def generateSimpleDeadlock(mapData, width, height, goalState, playerPos):
                     
     return deadLockLookUp
 
-def isValidMove(dest, boxCoordinates, mapData, width, height):
-    if dest[1] < 0 or dest[1] >= width or dest[0] < 0 or dest[0] >= height:
-        return False
-    if mapData[dest[0]][dest[1]] == '#':
-        return False
-    if dest in boxCoordinates:
-        return False
-    return True
-
-def movePlayer(playerCoordinate, dest, boxCoordinates, mapData, width, height, deadLockTable):
-    deltaX = dest[0] - playerCoordinate[0]
-    deltaY = dest[1] - playerCoordinate[1]
-    newDest = (dest[0] + deltaX, dest[1] + deltaY)
-
-    # if player is pushing a box
-    if dest in boxCoordinates:
-        # if pushing into a wall or something, prune
-        if not isValidMove(newDest, boxCoordinates, mapData, width, height):
-            return None
-        # if moving into a simple deadlock, prune
-        if deadLockTable[newDest[0]][newDest[1]]:
-            return None
-
-        # hypothetical situation where we already pushed the box
-        newBoxCoordinates = frozenset(boxCoordinates - {dest} | {newDest})
-
-        return (dest, newBoxCoordinates)
-    # else the player is just moving to an empty space
-    elif isValidMove(dest, boxCoordinates, mapData, width, height):
-        return (dest, boxCoordinates)
-    # if all else fails, return None
-    return None
-
 def generateDistanceMatrices(goalState, mapData, width, height, deadLockTable):
     #create goalState many matrices in a dict
     matrices = {}
@@ -266,8 +243,10 @@ def generateDistanceMatrices(goalState, mapData, width, height, deadLockTable):
                 row = value[0]
                 col = value[1]
                 dest = (currentPos[0] + row, currentPos[1] + col)
+                #the player has to stand behind dest to push the box back to currentPos, so that cant be a wall
+                playerStand = (dest[0] + row, dest[1] + col)
                 #def detectBlockedAxes(boxCoordinate, mapData, width, height, deadLockTable, explored, axes, boxCoordinates):
-                if isValid(dest, mapData, width, height) and deadLockTable[dest[0]][dest[1]] == False:
+                if isValid(dest, mapData, width, height) and deadLockTable[dest[0]][dest[1]] == False and isValid(playerStand, mapData, width, height):
                     if dest not in explored:
                         explored.add(dest)
                         newCtr = currentCtr + 1
@@ -327,34 +306,28 @@ def countRegions(mapData, width, height, boxes):
     # Return the number of rooms found
     return rooms
 
-def reachablePlayerTiles(playerPosition, boxCoordinates, walls):
-    frontier = deque([playerPosition])
+def reachablePlayerTiles(playerPosition, boxCoordinates, neighbors):
+    frontier = [playerPosition]
     reachable = {playerPosition}
     minimumCell = playerPosition
-    while frontier:
-        current = frontier.popleft()
-        for destRow, destCol in DIRECTION:
-            dest = (current[0] + destRow, current[1] + destCol)
-            if dest not in reachable and dest not in walls and dest not in boxCoordinates:
+    #looping over a list that keeps growing is faster than popleft on a deque
+    for current in frontier:
+        for dest in neighbors[current]:
+            if dest not in reachable and dest not in boxCoordinates:
                 reachable.add(dest)
                 frontier.append(dest)
                 if dest < minimumCell:
                     minimumCell = dest
     return reachable, minimumCell
 
-def getCorralFromTile(startPos, reachable, boxCoordinates, walls, width, height):
-    frontier = deque([startPos])
+def getCorralFromTile(startPos, boxCoordinates, neighbors):
+    frontier = [startPos]
     corral = {startPos}
     corralBoxes = set()
     
-    while frontier:
-        current = frontier.popleft()
-        for destRow, destCol in DIRECTION:
-            dest = (current[0] + destRow, current[1] + destCol)
-            
-            if dest[0] < 0 or dest[0] >= height or dest[1] < 0 or dest[1] >= width:
-                continue
-            if dest in corral or dest in walls:
+    for current in frontier:
+        for dest in neighbors[current]:
+            if dest in corral:
                 continue
             if dest in boxCoordinates:
                 corralBoxes.add(dest)
@@ -439,12 +412,29 @@ class SokoBot:
         
         distances = generateDistanceMatrices(goalState, mapData, width, height, deadLockTable)
         distanceStack = buildDistanceStack(distances, goalState)
-        heuristicCache = {}
-        freezeSubset = set()
+        freezeSubset = defaultdict(list)
+
+        #walls never move, so get the neighbors of every floor tile once instead of every bfs step
+        neighbors = {}
+        for row in range(height):
+            for col in range(width):
+                if (row, col) in walls:
+                    continue
+                neighbors[(row, col)] = tuple(
+                    (row + destRow, col + destCol)
+                    for destRow, destCol in DIRECTION
+                    if 0 <= row + destRow < height and 0 <= col + destCol < width
+                    and (row + destRow, col + destCol) not in walls
+                )
 
         boxCoordinates = frozenset(boxCoordinates)
-        interiorTiles, _ = reachablePlayerTiles(playerPosition, frozenset(), walls)
-        startReachable, startMinimum = reachablePlayerTiles(playerPosition, boxCoordinates, walls)
+        interiorTiles, _ = reachablePlayerTiles(playerPosition, frozenset(), neighbors)
+        #every tile a box can be pushed onto without walking into a wall or a simple deadlock
+        validBoxTiles = frozenset(
+            tile for tile in interiorTiles if not deadLockTable[tile[0]][tile[1]]
+        )
+        heuristicCache = {}
+        startReachable, startMinimum = reachablePlayerTiles(playerPosition, boxCoordinates, neighbors)
         startState = (playerPosition, boxCoordinates, startReachable)
 
         def stateKey(state, minimumCell):
@@ -459,7 +449,7 @@ class SokoBot:
         frontier = []
         stateCounter = 0
         heuristic = calculateHeuristic(boxCoordinates, distanceStack, goalState, heuristicCache)
-        heapq.heappush(frontier, (heuristic, stateCounter, startKey))
+        heapq.heappush(frontier, (heuristic, -stateCounter, startKey))
         stateCounter += 1
 
         while frontier:
@@ -494,52 +484,57 @@ class SokoBot:
             boxesToExplore = currentBoxCoords
             exploredCorral = set()
 
-            for currentPos in interiorTiles:
-                if currentPos not in reachable and currentPos not in currentBoxCoords and currentPos not in exploredCorral:
-                    corral, corralBoxes = getCorralFromTile(currentPos, reachable, currentBoxCoords, walls, width, height)
-                    exploredCorral.update(corral)
+            #only start a corral from the tile right behind a box the player can push right now
+            #a pi corral always has one of these, so flooding any other pocket is just wasted work
+            corralSeeds = set()
+            for box in currentBoxCoords:
+                for destRow, destCol in DIRECTION:
+                    standingTile = (box[0] - destRow, box[1] - destCol)
+                    boxDestination = (box[0] + destRow, box[1] + destCol)
+                    if standingTile in reachable and boxDestination in interiorTiles:
+                        if boxDestination not in reachable and boxDestination not in currentBoxCoords:
+                            corralSeeds.add(boxDestination)
 
-                    if not corralBoxes:
-                        continue
+            for currentPos in corralSeeds:
+                if currentPos in exploredCorral:
+                    continue
+                corral, corralBoxes = getCorralFromTile(currentPos, currentBoxCoords, neighbors)
+                exploredCorral.update(corral)
 
-                    hasUnfinishedGoalOrBox = (
-                        any(box not in goalState for box in corralBoxes) or
-                        any(tile in goalState for tile in corral)
-                    )
-                    if not hasUnfinishedGoalOrBox:
-                        continue
+                #no boxes or every box in the corral means restricting to it prunes nothing
+                if not corralBoxes or len(corralBoxes) == len(currentBoxCoords):
+                    continue
 
-                    isPIC, totalCorral, totalBoxes = isPICorral(
-                        corral, corralBoxes, reachable, currentBoxCoords, walls, deadLockTable
-                    )
-                    exploredCorral.update(totalCorral)
+                #every box is already on a goal and theres no empty goal inside, so nothing to do here
+                if corralBoxes.issubset(goalState) and corral.isdisjoint(goalState):
+                    continue
 
-                    if isPIC:
-                        boxesToExplore = totalBoxes
-                        break
+                isPIC, _, totalBoxes = isPICorral(
+                    corral, corralBoxes, reachable, currentBoxCoords, walls, deadLockTable
+                )
+
+                if isPIC:
+                    boxesToExplore = totalBoxes
+                    break
 
             statesMade = 0
             for box in boxesToExplore:
                 for destRow, destCol in DIRECTION:
                     standingTile = (box[0] - destRow, box[1] - destCol)
-                    boxDestination = (box[0] + destRow, box[1] + destCol)
 
                     #If we cant reach the position of the player after pushing the box, cant push so prune
                     if standingTile not in reachable:
                         continue
 
-                    if boxDestination in walls or boxDestination in currentBoxCoords:
+                    boxDestination = (box[0] + destRow, box[1] + destCol)
+
+                    #if pushing into a wall, a simple deadlock or another box, prune
+                    if boxDestination not in validBoxTiles or boxDestination in currentBoxCoords:
                         continue
 
-                    newState = movePlayer( standingTile, box, currentBoxCoords, mapData, width,
-                                           height, deadLockTable)
-
-                    #If newstate is for any reason none (simpledeadlock, frozen box, etc) then prune
-                    if newState is None:
-                        continue
-
-                    newPlayerPos, newBoxCoords = newState
-
+                    #after the push the player ends up where the box was
+                    newPlayerPos = box
+                    newBoxCoords = (currentBoxCoords - {box}) | {boxDestination}
 
                     alreadyExplored = False
                     #if the boxes positions have been seen before
@@ -553,12 +548,8 @@ class SokoBot:
                     if alreadyExplored:
                         continue
 
-                    heuristic = calculateHeuristic(newState[1], distanceStack, goalState, heuristicCache)
-
-                    if heuristic >= 999999:
-                        continue
-
-                    if hasFreezeSubset(newBoxCoords, mapData, width, height, freezeSubset):
+                    #check the freeze deadlocks first so we dont waste time on the heuristic of a dead state
+                    if hasFreezeSubset(boxDestination, newBoxCoords, freezeSubset):
                         continue
 
                     freezeExplored = dict()
@@ -566,10 +557,18 @@ class SokoBot:
                     frozenBoxes = detectBlockedAxes(boxDestination, mapData, width, height, deadLockTable, freezeExplored, newBoxCoords, exploring)
                     if boxDestination in frozenBoxes and any(b not in goalState for b in frozenBoxes):
                         if len(frozenBoxes) <= 4:
-                            freezeSubset.add(frozenset(frozenBoxes))
+                            frozenPattern = frozenset(frozenBoxes)
+                            #save the pattern under every box in it so hasFreezeSubset only has to check the pushed box
+                            for frozenBox in frozenPattern:
+                                freezeSubset[frozenBox].append(frozenPattern)
                         continue
 
-                    newReachable, newMinimum = reachablePlayerTiles(newState[0], newState[1], walls)
+                    heuristic = calculateHeuristic(newBoxCoords, distanceStack, goalState, heuristicCache)
+
+                    if heuristic >= 999999:
+                        continue
+
+                    newReachable, newMinimum = reachablePlayerTiles(newPlayerPos, newBoxCoords, neighbors)
 
                     #if the boxes positions have not been seen before
                     if newBoxCoords not in exploredReigons:
@@ -577,14 +576,15 @@ class SokoBot:
                     #add the new reachable region to the list of explored regions for this box configuration
                     exploredReigons[newBoxCoords].append(newReachable)
 
-                    newState = (newState[0], newState[1], newReachable)
+                    newState = (newPlayerPos, newBoxCoords, newReachable)
                     newKey = stateKey(newState, newMinimum)
   
                     explored.add(newKey)
                     parents[newKey] = (currentKey, standingTile, (destRow, destCol))
                     stateByKey[newKey] = newState
 
-                    heapq.heappush(frontier, (heuristic, stateCounter, newKey))
+                    #negative counter so ties pop the newest state first, keeps following 1 push line instead of jumping around
+                    heapq.heappush(frontier, (heuristic, -stateCounter, newKey))
                     stateCounter += 1
                     statesMade += 1
 

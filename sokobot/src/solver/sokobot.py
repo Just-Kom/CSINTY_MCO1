@@ -73,7 +73,7 @@ def hasFreezeSubset(boxDestination, boxCoordinates, freezeSubset):
             return True
     return False
 
-def detectBlockedAxes(boxCoordinate, mapData, width, height, deadLockTable, explored, boxCoordinates, exploring):
+def detectBlockedAxes(boxCoordinate, validBoxTiles, walls, explored, boxCoordinates, exploring):
     def isFrozen(currentBox):
         if currentBox in explored:
             return explored[currentBox]
@@ -89,12 +89,10 @@ def detectBlockedAxes(boxCoordinate, mapData, width, height, deadLockTable, expl
 
             for deltaRow, deltaCol in axis:
                 dest = (currentBox[0] + deltaRow, currentBox[1] + deltaCol)
-                if dest[1] < 0 or dest[1] >= width or dest[0] < 0 or dest[0] >= height:
-                    continue
-                if mapData[dest[0]][dest[1]] == '#':
+                if dest in walls:
                     blockedAxes[axisIndex] = True
                     break
-                if deadLockTable[dest[0]][dest[1]]:
+                if dest not in validBoxTiles:
                     numOfSimpleDeadlocks += 1
                 if dest in boxCoordinates:
                     if dest in exploring:
@@ -131,7 +129,8 @@ def detectBlockedAxes(boxCoordinate, mapData, width, height, deadLockTable, expl
         explored[currentBox] = True
         return True
 
-    isFrozen(boxCoordinate)
+    if not isFrozen(boxCoordinate):
+        return None
     return {box for box, frozen in explored.items() if frozen}
     
 
@@ -191,18 +190,19 @@ def generateSimpleDeadlock(mapData, width, height, goalState, playerPos):
                 explored.add(startState)
 
     #we are trying to get the player to pull the 
-        while frontier:
-            currentState = frontier.popleft()
-            currentPlayerPos = currentState[0]
-            currentBoxCoords = currentState[1]
-            deadLockLookUp[currentBoxCoords[0]][currentBoxCoords[1]] = False
-            
-            # for each direction from the box, put the player in that direction and check if its valid
-            deltaRow =  currentPlayerPos[0] - currentBoxCoords[0]
-            deltaCol = currentPlayerPos[1] - currentBoxCoords[1]
-            # delta row and col is the direction of the player relative to the box
-            # we want to move the player 1 backwards
-            # the code below is the new state after moving the box
+    while frontier:
+        currentState = frontier.popleft()
+        currentPlayerPos = currentState[0]
+        currentBoxCoords = currentState[1]
+        deadLockLookUp[currentBoxCoords[0]][currentBoxCoords[1]] = False
+        
+        # for each direction from the box, put the player in that direction and check if its valid
+        deltaRow =  currentPlayerPos[0] - currentBoxCoords[0]
+        deltaCol = currentPlayerPos[1] - currentBoxCoords[1]
+        # delta row and col is the direction of the player relative to the box
+        # we want to move the player 1 backwards
+        # the code below is the new state after moving the box
+        if abs(deltaRow) + abs(deltaCol) == 1:
             row = deltaRow
             col = deltaCol
             dest = (currentPlayerPos[0] + row, currentPlayerPos[1] + col)
@@ -210,15 +210,15 @@ def generateSimpleDeadlock(mapData, width, height, goalState, playerPos):
             if newState is not None and newState not in explored:
                 explored.add(newState)
                 frontier.append(newState)
-            #move the player to the 4 adjacent tiles from where they are standing and check if its valid
-            for Colindex, direction in enumerate(DIRECTION):
-                destination = (currentPlayerPos[0] + direction[0], currentPlayerPos[1] + direction[1])
-                if destination != currentBoxCoords and isValid(destination, mapData, width, height):
-                    playerPosition = destination
-                    startState = (playerPosition, currentBoxCoords)
-                    if startState not in explored:
-                        frontier.append(startState)
-                        explored.add(startState)
+        #move the player to the 4 adjacent tiles from where they are standing and check if its valid
+        for Colindex, direction in enumerate(DIRECTION):
+            destination = (currentPlayerPos[0] + direction[0], currentPlayerPos[1] + direction[1])
+            if destination != currentBoxCoords and isValid(destination, mapData, width, height):
+                playerPosition = destination
+                startState = (playerPosition, currentBoxCoords)
+                if startState not in explored:
+                    frontier.append(startState)
+                    explored.add(startState)
                     
     return deadLockLookUp
 
@@ -261,13 +261,11 @@ def buildDistanceStack(distanceMatrices, goalState):
     distanceStack = np.stack([distanceMatrices[goalVal] for goalVal in goalState])
     return np.where(distanceStack == -1, 999999, distanceStack)
 
-def calculateHeuristic(boxCoordinates, distanceMatrices, goalState, heuristicCache, hotspotDictionary):
+def calculateHeuristic(boxCoordinates, tileDistances, heuristicCache, hotspotDictionary):
     if boxCoordinates in heuristicCache:
         return heuristicCache[boxCoordinates]
 
-    boxRows = [boxVal[0] for boxVal in boxCoordinates]
-    boxCols = [boxVal[1] for boxVal in boxCoordinates]
-    costMatrix = distanceMatrices[:, boxRows, boxCols].T
+    costMatrix = np.array([tileDistances[box] for box in boxCoordinates])
     row, col = linear_sum_assignment(costMatrix)
     hotspots = countHotspots(boxCoordinates, hotspotDictionary)
     heuristic = int(costMatrix[row, col].sum()) + hotspots * 10
@@ -294,9 +292,7 @@ def countRegions(mapData, width, height, boxes):
             frontier = [currentPos]
             explored.add(currentPos)
 
-            while frontier:
-                currentRow, currentCol = frontier.pop(0)
-
+            for currentRow, currentCol in frontier:
                 for rowY, colX in DIRECTION:
                     dest = (currentRow + rowY, currentCol + colX)
                     
@@ -485,9 +481,10 @@ def generateRoomsAndGraph(interiorTiles):
     #returning tileToRoom is highly recommended as you will need it for O(1) lookups during the solve
     return rooms, roomGraph, tileToRoom
 
-def generateHotspotTable(mapData, width, height, goalState, interiorTiles):
+def generateHotspotTable(goalState, interiorTiles, validBoxTiles, neighbors):
     def getReachableGoalsCount(hotspotTile):
         counts = {tile: 0 for tile in interiorTiles}
+        goalReached = {}
         
         for rowIndex, goal in enumerate(goalState):
             if goal == hotspotTile:
@@ -496,70 +493,70 @@ def generateHotspotTable(mapData, width, height, goalState, interiorTiles):
             #Check if a box can be pulled from a goalstate to a certain tile
             #BFS ALGO
             #explored is now tracking the player and box states for this specific target
-            frontier = deque()
+            frontier = []
             explored = set()
             reached = set()
             
-            for colIndex, direction in enumerate(DIRECTION):
-                dest = (goal[0] + direction[0], goal[1] + direction[1])
-                if isValid(dest, mapData, width, height) and dest != hotspotTile:
+            for dest in neighbors[goal]:
+                if dest != hotspotTile:
                     playerPosition = dest
                     boxPosition = goal
                     startState = (playerPosition, boxPosition)
                     frontier.append(startState)
                     explored.add(startState)
 
+            if frontier:
+                reached.add(goal)
+                counts[goal] += 1
+
             #we are trying to get the player to pull the 
-            while frontier:
-                currentState = frontier.popleft()
-                currentPlayerPos = currentState[0]
-                currentBoxCoords = currentState[1]
-                
-                if currentBoxCoords not in reached:
-                    reached.add(currentBoxCoords)
-                    counts[currentBoxCoords] += 1
-                
+            for currentPlayerPos, currentBoxCoords in frontier:
                 # for each direction from the box, put the player in that direction and check if its valid
                 deltaRow =  currentPlayerPos[0] - currentBoxCoords[0]
                 deltaCol = currentPlayerPos[1] - currentBoxCoords[1]
                 # delta row and col is the direction of the player relative to the box
                 # we want to move the player 1 backwards
                 # the code below is the new state after moving the box
-                row = deltaRow
-                col = deltaCol
-                dest = (currentPlayerPos[0] + row, currentPlayerPos[1] + col)
-                newState = movePlayerPull(currentPlayerPos, dest, currentBoxCoords, mapData, width, height)
-                
-                if newState is not None and newState[0] != hotspotTile and newState[1] != hotspotTile and newState not in explored:
-                    explored.add(newState)
-                    frontier.append(newState)
+                if abs(deltaRow) + abs(deltaCol) == 1:
+                    dest = (currentPlayerPos[0] + deltaRow, currentPlayerPos[1] + deltaCol)
+                    if dest in neighbors[currentPlayerPos] and dest != hotspotTile:
+                        newState = (dest, currentPlayerPos)
+                        if newState not in explored:
+                            explored.add(newState)
+                            frontier.append(newState)
+                            if currentPlayerPos not in reached:
+                                reached.add(currentPlayerPos)
+                                counts[currentPlayerPos] += 1
                 #move the player to the 4 adjacent tiles from where they are standing and check if its valid
-                for colIndex, direction in enumerate(DIRECTION):
-                    destination = (currentPlayerPos[0] + direction[0], currentPlayerPos[1] + direction[1])
-                    if destination != currentBoxCoords and destination != hotspotTile and isValid(destination, mapData, width, height):
-                        playerPosition = destination
-                        startState = (playerPosition, currentBoxCoords)
+                for destination in neighbors[currentPlayerPos]:
+                    if destination != currentBoxCoords and destination != hotspotTile:
+                        startState = (destination, currentBoxCoords)
                         if startState not in explored:
                             frontier.append(startState)
                             explored.add(startState)
+
+            goalReached[goal] = reached
                             
-        return counts
+        return counts, goalReached
 
     # get the number of reachable goals if there are no hotspots
-    reachableGoalCount = getReachableGoalsCount(None)
+    reachableGoalCount, goalReached = getReachableGoalsCount(None)
     
     #map a tuple coordinate acting as a hotspot to a set of trapped tuple coordinates
     hotspotDictionary = {tile: set() for tile in interiorTiles}
     
     #test every valid floor tile as an immovable hotspot
-    for hotspotTile in interiorTiles:
-        hotspotGoalCount = getReachableGoalsCount(hotspotTile)
+    for hotspotTile in validBoxTiles:
+        hotspotGoalCount, _ = getReachableGoalsCount(hotspotTile)
         
-        for tile in interiorTiles:
+        for tile in validBoxTiles:
             if tile == hotspotTile:
                 continue
+            expectedCount = reachableGoalCount[tile]
+            if hotspotTile in goalReached and tile in goalReached[hotspotTile]:
+                expectedCount -= 1
             #if the number of reachable goals dropped, the hotspot tile is blocking boxes on this tile from getting into our goal room
-            if hotspotGoalCount[tile] < reachableGoalCount[tile]:
+            if hotspotGoalCount[tile] < expectedCount:
                 hotspotDictionary[hotspotTile].add(tile)
                 
     return hotspotDictionary
@@ -599,7 +596,7 @@ class SokoBot:
         
         distances = generateDistanceMatrices(goalState, mapData, width, height, deadLockTable)
         distanceStack = buildDistanceStack(distances, goalState)
-        freezeSubset = defaultdict(list)
+        freezeSubset = defaultdict(set)
 
         #walls never move, so get the neighbors of every floor tile once instead of every bfs step
         neighbors = {}
@@ -620,7 +617,8 @@ class SokoBot:
         validBoxTiles = frozenset(
             tile for tile in interiorTiles if not deadLockTable[tile[0]][tile[1]]
         )
-        hotspotDictionary = generateHotspotTable(mapData, width, height, goalState, interiorTiles)
+        tileDistances = {tile: distanceStack[:, tile[0], tile[1]] for tile in interiorTiles}
+        hotspotDictionary = generateHotspotTable(goalState, interiorTiles, validBoxTiles, neighbors)
         heuristicCache = {}
         startReachable, startMinimum = reachablePlayerTiles(playerPosition, boxCoordinates, neighbors)
         startState = (playerPosition, boxCoordinates, startReachable)
@@ -633,17 +631,18 @@ class SokoBot:
         stateByKey = {startKey: startState}
         
         parents = {startKey: None}
-        explored = {startKey}
-        exploredReigons = {boxCoordinates: [startReachable]}
+        exploredReigons = defaultdict(list)
+        exploredReigons[boxCoordinates].append(startReachable)
         frontier = []
         stateCounter = 0
-        heuristic = calculateHeuristic(boxCoordinates, distanceStack, goalState, heuristicCache, hotspotDictionary)
+        heuristic = calculateHeuristic(boxCoordinates, tileDistances, heuristicCache, hotspotDictionary)
         heapq.heappush(frontier, (heuristic, -stateCounter, startKey))
         stateCounter += 1
 
         while frontier:
             _, _, currentKey = heapq.heappop(frontier)
             currentPlayerPos, currentBoxCoords, reachable = stateByKey[currentKey]
+            stateByKey[currentKey] = (currentPlayerPos, currentBoxCoords, None)
 
             if currentBoxCoords == goalState:
                 transitions = []
@@ -665,8 +664,8 @@ class SokoBot:
                     winPath.extend(walk)
                     winPath.append(DIRECTIONS[pushDirection]*pushCount)
 
-                print(f"Total states explored: {len(explored)}")
-                distinct = {key[1] for key in explored}
+                print(f"Total states explored: {len(stateByKey)}")
+                distinct = {key[1] for key in stateByKey}
                 print(f"Total unique box configurations explored: {len(distinct)}")
                 return ''.join(winPath)
 
@@ -723,20 +722,19 @@ class SokoBot:
 
                     #after the push the player ends up where the box was
                     newPlayerPos = box
-                    newBoxCoords = (currentBoxCoords - {box}) | {boxDestination}
                     pushDirection = (destRow, destCol)
                     pushCount = 1
                     movingBox = boxDestination
                     #keep pushing the box through the tunnel until it comes out the other side or hits something
                     while (movingBox, pushDirection) in tunnelTiles:
                         nextBox = (movingBox[0] + destRow, movingBox[1] + destCol)
-                        if nextBox not in validBoxTiles or nextBox in newBoxCoords:
+                        if nextBox not in validBoxTiles or nextBox in currentBoxCoords:
                             break
-                        newBoxCoords = (newBoxCoords - {movingBox}) | {nextBox}
                         newPlayerPos = movingBox
                         movingBox = nextBox
                         pushCount += 1
                     boxDestination = movingBox
+                    newBoxCoords = (currentBoxCoords - {box}) | {boxDestination}
 
                     alreadyExplored = False
                     #if the boxes positions have been seen before
@@ -750,38 +748,37 @@ class SokoBot:
                     if alreadyExplored:
                         continue
 
-                    #check the freeze deadlocks first so we dont waste time on the heuristic of a dead state
-                    if hasFreezeSubset(boxDestination, newBoxCoords, freezeSubset):
-                        continue
+                    if newBoxCoords in heuristicCache:
+                        heuristic = heuristicCache[newBoxCoords]
+                    else:
+                        #check the freeze deadlocks first so we dont waste time on the heuristic of a dead state
+                        if hasFreezeSubset(boxDestination, newBoxCoords, freezeSubset):
+                            continue
 
-                    freezeExplored = dict()
-                    exploring = set()
-                    frozenBoxes = detectBlockedAxes(boxDestination, mapData, width, height, deadLockTable, freezeExplored, newBoxCoords, exploring)
-                    if boxDestination in frozenBoxes and any(b not in goalState for b in frozenBoxes):
-                        if len(frozenBoxes) <= 4:
-                            frozenPattern = frozenset(frozenBoxes)
-                            #save the pattern under every box in it so hasFreezeSubset only has to check the pushed box
-                            for frozenBox in frozenPattern:
-                                freezeSubset[frozenBox].append(frozenPattern)
-                        continue
+                        freezeExplored = dict()
+                        exploring = set()
+                        frozenBoxes = detectBlockedAxes(boxDestination, validBoxTiles, walls, freezeExplored, newBoxCoords, exploring)
+                        if frozenBoxes is not None and any(b not in goalState for b in frozenBoxes):
+                            if len(frozenBoxes) <= 4:
+                                frozenPattern = frozenset(frozenBoxes)
+                                #save the pattern under every box in it so hasFreezeSubset only has to check the pushed box
+                                for frozenBox in frozenPattern:
+                                    freezeSubset[frozenBox].add(frozenPattern)
+                            continue
 
-                    heuristic = calculateHeuristic(newBoxCoords, distanceStack, goalState, heuristicCache, hotspotDictionary)
+                        heuristic = calculateHeuristic(newBoxCoords, tileDistances, heuristicCache, hotspotDictionary)
 
                     if heuristic >= 999999:
                         continue
 
                     newReachable, newMinimum = reachablePlayerTiles(newPlayerPos, newBoxCoords, neighbors)
 
-                    #if the boxes positions have not been seen before
-                    if newBoxCoords not in exploredReigons:
-                        exploredReigons[newBoxCoords] = []
                     #add the new reachable region to the list of explored regions for this box configuration
                     exploredReigons[newBoxCoords].append(newReachable)
 
                     newState = (newPlayerPos, newBoxCoords, newReachable)
                     newKey = stateKey(newState, newMinimum)
   
-                    explored.add(newKey)
                     parents[newKey] = (currentKey, standingTile, (destRow, destCol), pushCount)
                     stateByKey[newKey] = newState
 

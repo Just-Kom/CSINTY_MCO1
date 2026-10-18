@@ -507,10 +507,6 @@ class SokoBot:
         )
         hotspotDictionary = generateHotspotTable(goalState, interiorTiles, validBoxTiles, neighbors)
         rooms, roomGraph, tileToRoom = generateRoomsAndGraph(interiorTiles)
-        basins, sinkBasin, packingPlan = generateBasinsAndPlan(
-            goalState, boxCoordinates, interiorTiles, validBoxTiles, rooms, neighbors
-        )
-        deadlockPatterns = generateDeadlockPatterns(validBoxTiles, goalState, walls)
         heuristicCache = {}
         featureSpaceCache = {}
         startReachable, startMinimum = reachablePlayerTiles(playerPosition, boxCoordinates, neighbors)
@@ -523,12 +519,10 @@ class SokoBot:
         def getFeatureSpace(boxes):
             if boxes in featureSpaceCache:
                 return featureSpaceCache[boxes]
-            oop = getOOPBoxes(boxes, goalState, sinkBasin)
-            packed = getPackedBoxes(boxes, goalState, packingPlan)
+            packed = getPackedBoxes(boxes, goalState)
             connectivity = countRegions(interiorTiles, boxes, neighbors)
             roomConnectivity = countRoomConnectivity(boxes, rooms, roomGraph, tileToRoom, neighbors)
-            hotspots = countHotspots(boxes, hotspotDictionary)
-            rawFeatureSpace = (oop, -packed, connectivity, roomConnectivity, hotspots)
+            rawFeatureSpace = (-packed, connectivity, roomConnectivity)
             featureSpaceCache[boxes] = rawFeatureSpace
             return rawFeatureSpace
 
@@ -540,19 +534,11 @@ class SokoBot:
         exploredReigons = {boxCoordinates: [startReachable]}
         featureSpaceQueues = defaultdict(list)
         stateCounter = 0
-        startFullFeatures = getFeatureSpace(boxCoordinates)
-        startFeatureSpace = startFullFeatures[:4]
+        startFeatureSpace = getFeatureSpace(boxCoordinates)
         bestAncestorFeatureSpace = {startKey: startFeatureSpace}
-        nodeWeights = {startKey: 0}
-        parentNodeMap = {startKey: None}
-        aliveChildren = defaultdict(int)
-        deadlockedNodes = set()
         heuristic = calculateHeuristic(boxCoordinates, distanceStack, goalState, heuristicCache, hotspotDictionary)
         mobility = countMobility(boxCoordinates, startReachable, neighbors)
-        heapq.heappush(
-            featureSpaceQueues[startFeatureSpace],
-            (0, heuristic, *startFullFeatures, heuristic, -mobility, -stateCounter, startKey)
-        )
+        heapq.heappush(featureSpaceQueues[startFeatureSpace], (heuristic, -mobility, -stateCounter, startKey))
         stateCounter += 1
 
         while featureSpaceQueues:
@@ -561,26 +547,12 @@ class SokoBot:
                 if not featureSpaceHeap:
                     featureSpaceQueues.pop(featureSpaceKey, None)
                     continue
-
-                currentKey = None
-                while featureSpaceHeap:
-                    item = heapq.heappop(featureSpaceHeap)
-                    candKey = item[-1]
-                    parentKey = parentNodeMap.get(candKey)
-                    if parentKey is not None and parentKey in deadlockedNodes:
-                        continue
-                    currentKey = candKey
-                    break
-
+                _, _, _, currentKey = heapq.heappop(featureSpaceHeap)
                 if not featureSpaceHeap:
-                    featureSpaceQueues.pop(featureSpaceKey, None)
-                if currentKey is None:
-                    continue
+                    del featureSpaceQueues[featureSpaceKey]
 
                 currentPlayerPos, currentBoxCoords, reachable = stateByKey[currentKey]
                 currentBestAncestor = bestAncestorFeatureSpace[currentKey]
-                parentWeight = nodeWeights[currentKey]
-                parentFeatures = getFeatureSpace(currentBoxCoords)
 
                 if currentBoxCoords == goalState:
                     transitions = []
@@ -644,7 +616,6 @@ class SokoBot:
                         break
 
                 statesMade = 0
-                candidateMoves = []
                 for box in boxesToExplore:
                     macroFrontier = [(currentKey, box, currentBoxCoords, reachable)]
                     for macroParentKey, currentBox, macroBoxCoords, macroReachable in macroFrontier:
@@ -690,9 +661,6 @@ class SokoBot:
                             if alreadyExplored:
                                 continue
 
-                            if isPatternDeadlock(boxDestination, newBoxCoords, deadlockPatterns):
-                                continue
-
                             #check the freeze deadlocks first so we dont waste time on the heuristic of a dead state
                             if hasFreezeSubset(boxDestination, newBoxCoords, freezeSubset):
                                 continue
@@ -700,20 +668,13 @@ class SokoBot:
                             freezeExplored = dict()
                             exploring = set()
                             frozenBoxes = detectBlockedAxes(boxDestination, mapData, width, height, deadLockTable, freezeExplored, newBoxCoords, exploring)
-                            if boxDestination in frozenBoxes:
-                                if any(b not in goalState for b in frozenBoxes):
-                                    if len(frozenBoxes) <= 4:
-                                        frozenPattern = frozenset(frozenBoxes)
-                                        #save the pattern under every box in it so hasFreezeSubset only has to check the pushed box
-                                        for frozenBox in frozenPattern:
-                                            freezeSubset[frozenBox].append(frozenPattern)
-                                    continue
-                                if isRetrogradeDeadlock(newBoxCoords, frozenBoxes, goalState, neighbors):
-                                    continue
-                                if isRoomDeadlock(newBoxCoords, frozenBoxes, rooms, goalState, neighbors):
-                                    continue
-                                if isDynamicBipartiteDeadlock(newBoxCoords, frozenBoxes, goalState, neighbors, validBoxTiles):
-                                    continue
+                            if boxDestination in frozenBoxes and any(b not in goalState for b in frozenBoxes):
+                                if len(frozenBoxes) <= 4:
+                                    frozenPattern = frozenset(frozenBoxes)
+                                    #save the pattern under every box in it so hasFreezeSubset only has to check the pushed box
+                                    for frozenBox in frozenPattern:
+                                        freezeSubset[frozenBox].append(frozenPattern)
+                                continue
 
                             heuristic = calculateHeuristic(newBoxCoords, distanceStack, goalState, heuristicCache, hotspotDictionary)
 
@@ -734,55 +695,22 @@ class SokoBot:
                             explored.add(newKey)
                             parents[newKey] = (macroParentKey, standingTile, (destRow, destCol), pushCount)
                             stateByKey[newKey] = newState
-                            parentNodeMap[newKey] = currentKey
-                            aliveChildren[currentKey] += 1
 
-                            fullFeatures = getFeatureSpace(newBoxCoords)
+                            rawFeatureSpace = getFeatureSpace(newBoxCoords)
+                            projectedFeatureSpace, newBestAncestor = getProjectedFeatureSpace(rawFeatureSpace, currentBestAncestor)
+                            bestAncestorFeatureSpace[newKey] = newBestAncestor
                             mobility = countMobility(newBoxCoords, newReachable, neighbors)
-                            featureTuple = (*fullFeatures, heuristic, -mobility)
 
-                            candidateMoves.append((featureTuple, box, boxDestination, newBoxCoords, newReachable, newKey))
+                            #negative counter so ties pop the newest state first, keeps following 1 push line instead of jumping around
+                            heapq.heappush(featureSpaceQueues[projectedFeatureSpace], (heuristic, -mobility, -stateCounter, newKey))
+                            stateCounter += 1
                             statesMade += 1
                             macroFrontier.append((newKey, boxDestination, newBoxCoords, newReachable))
-
-                if not candidateMoves:
-                    propagateDeadlock(currentKey, parentNodeMap, aliveChildren, deadlockedNodes)
-                    continue
-
-                advisedKeys = selectAdvisedMoves(
-                    candidateMoves, parentFeatures, reachable, currentBoxCoords, hotspotDictionary, sinkBasin, validBoxTiles
-                )
-
-                for featureTuple, pushedBox, boxDestination, newBoxCoords, newReachable, newKey in candidateMoves:
-                    moveWeight = 0 if newKey in advisedKeys else 1
-                    childWeight = parentWeight + moveWeight
-                    nodeWeights[newKey] = childWeight
-
-                    rawFeatureSpace = featureTuple[:4]
-                    projectedFeatureSpace, newBestAncestor = getProjectedFeatureSpace(rawFeatureSpace, currentBestAncestor)
-                    bestAncestorFeatureSpace[newKey] = newBestAncestor
-                    heuristic = featureTuple[5]
-
-                    #negative counter so ties pop the newest state first, keeps following 1 push line instead of jumping around
-                    heapq.heappush(
-                        featureSpaceQueues[projectedFeatureSpace],
-                        (moveWeight, heuristic, *featureTuple, -stateCounter, newKey)
-                    )
-                    stateCounter += 1
 
         return ""
 
 
-def getOOPBoxes(boxCoordinates=None, goalState=None, sinkBasin=None):
-    if not boxCoordinates or not sinkBasin:
-        return 0
-    oop = 0
-    for box in boxCoordinates:
-        if box not in goalState and box not in sinkBasin:
-            oop += 1
-    return oop
-
-def getPackedBoxes(boxCoordinates, goalState, packingPlan=None):
+def getPackedBoxes(boxCoordinates, goalState):
     packed = 0
     for box in boxCoordinates:
         if box in goalState:
@@ -947,306 +875,3 @@ def getProjectedFeatureSpace(rawFeatureSpace, bestAncestorFeatureSpace):
     return bestAncestorFeatureSpace, bestAncestorFeatureSpace
 
 getProjectedCell = getProjectedFeatureSpace
-
-def generateBasinsAndPlan(goalState, boxCoordinates, interiorTiles, validBoxTiles, rooms, neighbors):
-    basins = {}
-    for goal in goalState:
-        otherGoals = goalState - {goal}
-        frontier = []
-        explored = set()
-        basin = {goal}
-
-        for dest in neighbors[goal]:
-            if dest not in otherGoals:
-                startState = (dest, goal)
-                frontier.append(startState)
-                explored.add(startState)
-
-        for currentPlayerPos, currentBoxCoords in frontier:
-            deltaRow = currentPlayerPos[0] - currentBoxCoords[0]
-            deltaCol = currentPlayerPos[1] - currentBoxCoords[1]
-            if abs(deltaRow) + abs(deltaCol) == 1:
-                dest = (currentPlayerPos[0] + deltaRow, currentPlayerPos[1] + deltaCol)
-                if dest in neighbors[currentPlayerPos] and dest not in otherGoals and currentPlayerPos in validBoxTiles:
-                    newState = (dest, currentPlayerPos)
-                    if newState not in explored:
-                        explored.add(newState)
-                        basin.add(currentPlayerPos)
-                        frontier.append(newState)
-
-            for destination in neighbors[currentPlayerPos]:
-                if destination != currentBoxCoords and destination not in otherGoals:
-                    nextState = (destination, currentBoxCoords)
-                    if nextState not in explored:
-                        explored.add(nextState)
-                        frontier.append(nextState)
-
-        basins[goal] = frozenset(basin)
-
-    sinkRoom = set()
-    bestBoxCount = -1
-    for roomTiles in rooms:
-        associatedBasin = set(roomTiles)
-        for goal, basin in basins.items():
-            if not roomTiles.isdisjoint(basin):
-                associatedBasin.update(basin)
-        boxCount = len(associatedBasin & boxCoordinates)
-        if boxCount > bestBoxCount or (boxCount == bestBoxCount and len(associatedBasin) > len(sinkRoom)):
-            bestBoxCount = boxCount
-            sinkRoom = associatedBasin
-
-    if not sinkRoom:
-        for basin in basins.values():
-            sinkRoom.update(basin)
-    sinkBasin = frozenset(sinkRoom)
-
-    remainingGoals = set(goalState)
-    pulledOrder = []
-    while remainingGoals:
-        bestGoal = None
-        bestReach = -1
-        for goal in remainingGoals:
-            otherBoxes = remainingGoals - {goal}
-            frontier = []
-            explored = set()
-            reachedTiles = {goal}
-            for dest in neighbors[goal]:
-                if dest not in otherBoxes:
-                    frontier.append((dest, goal))
-                    explored.add((dest, goal))
-            for currentPlayerPos, currentBoxCoords in frontier:
-                deltaRow = currentPlayerPos[0] - currentBoxCoords[0]
-                deltaCol = currentPlayerPos[1] - currentBoxCoords[1]
-                if abs(deltaRow) + abs(deltaCol) == 1:
-                    dest = (currentPlayerPos[0] + deltaRow, currentPlayerPos[1] + deltaCol)
-                    if dest in neighbors[currentPlayerPos] and dest not in otherBoxes and currentPlayerPos in validBoxTiles:
-                        newState = (dest, currentPlayerPos)
-                        if newState not in explored:
-                            explored.add(newState)
-                            reachedTiles.add(currentPlayerPos)
-                            frontier.append(newState)
-                for destination in neighbors[currentPlayerPos]:
-                    if destination != currentBoxCoords and destination not in otherBoxes:
-                        nextState = (destination, currentBoxCoords)
-                        if nextState not in explored:
-                            explored.add(nextState)
-                            frontier.append(nextState)
-
-            inSink = 1 if len(reachedTiles & sinkBasin) > 1 else 0
-            score = inSink * 10000 + len(reachedTiles)
-            if score > bestReach:
-                bestReach = score
-                bestGoal = goal
-
-        pulledOrder.append(bestGoal)
-        remainingGoals.remove(bestGoal)
-
-    packingPlan = tuple(reversed(pulledOrder))
-    return basins, sinkBasin, packingPlan
-
-def selectAdvisedMoves(candidateMoves, parentFeatures, parentReachable, currentBoxCoords, hotspotDictionary, sinkBasin, validBoxTiles):
-    if not candidateMoves:
-        return set()
-
-    parentOOP, parentNegPacked, parentConn, parentRoomConn, parentHotspots = parentFeatures
-    advisedKeys = set()
-
-    bestMove = None
-    for move in candidateMoves:
-        if move[0][1] < parentNegPacked:
-            if bestMove is None or move[0] < bestMove[0]:
-                bestMove = move
-    if bestMove is not None:
-        advisedKeys.add(bestMove[5])
-
-    bestMove = None
-    for move in candidateMoves:
-        if move[0][2] < parentConn:
-            if bestMove is None or move[0] < bestMove[0]:
-                bestMove = move
-    if bestMove is not None:
-        advisedKeys.add(bestMove[5])
-
-    bestMove = None
-    for move in candidateMoves:
-        if move[0][3] < parentRoomConn:
-            if bestMove is None or move[0] < bestMove[0]:
-                bestMove = move
-    if bestMove is not None:
-        advisedKeys.add(bestMove[5])
-
-    bestMove = None
-    for move in candidateMoves:
-        if move[0][4] < parentHotspots:
-            if bestMove is None or move[0] < bestMove[0]:
-                bestMove = move
-    if bestMove is not None:
-        advisedKeys.add(bestMove[5])
-
-    parentPushableSides = set()
-    for box in currentBoxCoords:
-        for dr, dc in DIRECTION:
-            standing = (box[0] - dr, box[1] - dc)
-            dest = (box[0] + dr, box[1] + dc)
-            if standing in parentReachable and dest in validBoxTiles and dest not in currentBoxCoords:
-                parentPushableSides.add((box, standing))
-
-    bestMove = None
-    for move in candidateMoves:
-        _, pushedBox, boxDest, newBoxCoords, newReachable, newKey = move
-        openedNewSide = False
-        for otherBox in currentBoxCoords:
-            if otherBox == pushedBox:
-                continue
-            for dr, dc in DIRECTION:
-                standing = (otherBox[0] - dr, otherBox[1] - dc)
-                dest = (otherBox[0] + dr, otherBox[1] + dc)
-                if (otherBox, standing) not in parentPushableSides:
-                    if standing in newReachable and dest in validBoxTiles and dest not in newBoxCoords:
-                        openedNewSide = True
-                        break
-            if openedNewSide:
-                break
-        if openedNewSide:
-            if bestMove is None or move[0] < bestMove[0]:
-                bestMove = move
-    if bestMove is not None:
-        advisedKeys.add(bestMove[5])
-
-    bestHotspotBox = None
-    maxTrapped = 0
-    for box in currentBoxCoords:
-        trappedCount = len(hotspotDictionary[box] & currentBoxCoords)
-        if trappedCount > maxTrapped:
-            maxTrapped = trappedCount
-            bestHotspotBox = box
-
-    if bestHotspotBox is not None:
-        bestMove = None
-        for move in candidateMoves:
-            if move[1] == bestHotspotBox and move[0][2] <= parentConn:
-                if bestMove is None or move[0] < bestMove[0]:
-                    bestMove = move
-        if bestMove is None:
-            for move in candidateMoves:
-                pushedBox, boxDest = move[1], move[2]
-                if move[0][2] <= parentConn:
-                    oldDist = abs(pushedBox[0] - bestHotspotBox[0]) + abs(pushedBox[1] - bestHotspotBox[1])
-                    newDist = abs(boxDest[0] - bestHotspotBox[0]) + abs(boxDest[1] - bestHotspotBox[1])
-                    if oldDist <= 3 and newDist > oldDist:
-                        if bestMove is None or move[0] < bestMove[0]:
-                            bestMove = move
-        if bestMove is not None:
-            advisedKeys.add(bestMove[5])
-
-    if parentOOP > 0 and sinkBasin:
-        bestMove = None
-        for move in candidateMoves:
-            pushedBox, boxDest = move[1], move[2]
-            if pushedBox not in sinkBasin and boxDest in sinkBasin and move[0][2] <= parentConn:
-                if bestMove is None or move[0] < bestMove[0]:
-                    bestMove = move
-        if bestMove is not None:
-            advisedKeys.add(bestMove[5])
-
-    return advisedKeys
-
-def generateDeadlockPatterns(validBoxTiles, goalState, walls):
-    deadlockPatterns = defaultdict(list)
-    for r, c in validBoxTiles:
-        for dr in (-1, 0):
-            for dc in (-1, 0):
-                quad = ((r + dr, c + dc), (r + dr + 1, c + dc), (r + dr, c + dc + 1), (r + dr + 1, c + dc + 1))
-                requiredBoxes = frozenset(t for t in quad if t not in walls)
-                if len(requiredBoxes) >= 2 and any(t not in goalState for t in requiredBoxes):
-                    deadlockPatterns[(r, c)].append(requiredBoxes)
-    return deadlockPatterns
-
-def isPatternDeadlock(boxDestination, boxCoordinates, deadlockPatterns):
-    for requiredBoxes in deadlockPatterns.get(boxDestination, ()):
-        if requiredBoxes.issubset(boxCoordinates):
-            return True
-    return False
-
-def isDynamicBipartiteDeadlock(boxCoordinates, frozenBoxes, goalState, neighbors, validBoxTiles):
-    remainingBoxes = boxCoordinates - frozenBoxes
-    remainingGoals = goalState - frozenBoxes
-    if not remainingBoxes:
-        return False
-
-    goalList = list(remainingGoals)
-    boxList = list(remainingBoxes)
-    costMatrix = np.full((len(boxList), len(goalList)), 999999)
-
-    for gIdx, goal in enumerate(goalList):
-        frontier = deque([(goal, 0)])
-        visited = {goal: 0}
-        while frontier:
-            curr, dist = frontier.popleft()
-            for dest in neighbors[curr]:
-                if dest in frozenBoxes or dest not in validBoxTiles or dest in visited:
-                    continue
-                dr, dc = dest[0] - curr[0], dest[1] - curr[1]
-                playerStand = (dest[0] + dr, dest[1] + dc)
-                if playerStand in neighbors[dest] and playerStand not in frozenBoxes:
-                    visited[dest] = dist + 1
-                    frontier.append((dest, dist + 1))
-        for bIdx, box in enumerate(boxList):
-            if box in visited:
-                costMatrix[bIdx, gIdx] = visited[box]
-
-    row, col = linear_sum_assignment(costMatrix)
-    return int(costMatrix[row, col].sum()) >= 999999
-
-def isRetrogradeDeadlock(boxCoordinates, frozenBoxes, goalState, neighbors):
-    remainingGoals = set(goalState - frozenBoxes)
-    emptyGoals = goalState - boxCoordinates
-    if not emptyGoals:
-        return False
-    changed = True
-    while changed and remainingGoals:
-        changed = False
-        for goal in list(remainingGoals):
-            canPull = False
-            for stand in neighbors[goal]:
-                if stand in frozenBoxes or stand in remainingGoals:
-                    continue
-                dr, dc = stand[0] - goal[0], stand[1] - goal[1]
-                pullDest = (stand[0] + dr, stand[1] + dc)
-                if pullDest in neighbors[stand] and pullDest not in frozenBoxes and pullDest not in remainingGoals:
-                    canPull = True
-                    break
-            if canPull:
-                remainingGoals.remove(goal)
-                changed = True
-    return not emptyGoals.isdisjoint(remainingGoals)
-
-def isRoomDeadlock(boxCoordinates, frozenBoxes, rooms, goalState, neighbors):
-    if not frozenBoxes:
-        return False
-    for roomTiles in rooms:
-        boxesInRoom = roomTiles & boxCoordinates
-        if len(boxesInRoom) > len(roomTiles & goalState):
-            hasOpenExit = False
-            for tile in roomTiles:
-                for dest in neighbors[tile]:
-                    if dest not in roomTiles and dest not in frozenBoxes:
-                        hasOpenExit = True
-                        break
-                if hasOpenExit:
-                    break
-            if not hasOpenExit:
-                return True
-    return False
-
-def propagateDeadlock(nodeKey, parentNodeMap, aliveChildren, deadlockedNodes):
-    curr = nodeKey
-    while curr is not None and curr not in deadlockedNodes:
-        if aliveChildren[curr] <= 0:
-            deadlockedNodes.add(curr)
-            parent = parentNodeMap.get(curr)
-            if parent is not None:
-                aliveChildren[parent] -= 1
-            curr = parent
-        else:
-            break

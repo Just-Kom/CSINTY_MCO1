@@ -506,7 +506,9 @@ class SokoBot:
             tile for tile in interiorTiles if not deadLockTable[tile[0]][tile[1]]
         )
         hotspotDictionary = generateHotspotTable(goalState, interiorTiles, validBoxTiles, neighbors)
+        rooms, roomGraph, tileToRoom = generateRoomsAndGraph(interiorTiles)
         heuristicCache = {}
+        cellCache = {}
         startReachable, startMinimum = reachablePlayerTiles(playerPosition, boxCoordinates, neighbors)
         startState = (playerPosition, boxCoordinates, startReachable)
         tunnelTiles = detectTunnelSquares(interiorTiles, goalState, walls)
@@ -514,166 +516,197 @@ class SokoBot:
         def stateKey(state, minimumCell):
             return (minimumCell, state[1])
 
+        def getRawCell(boxes):
+            if boxes in cellCache:
+                return cellCache[boxes]
+            oop = getOOPBoxes()
+            packed = getPackedBoxes(boxes, goalState)
+            connectivity = countRegions(mapData, width, height, boxes)
+            roomConnectivity = countRoomConnectivity(boxes, rooms, roomGraph, tileToRoom, neighbors)
+            rawCell = (oop, -packed, connectivity, roomConnectivity)
+            cellCache[boxes] = rawCell
+            return rawCell
+
         startKey = stateKey(startState, startMinimum)
         stateByKey = {startKey: startState}
         
         parents = {startKey: None}
         explored = {startKey}
         exploredReigons = {boxCoordinates: [startReachable]}
-        frontier = []
+        cellQueues = defaultdict(list)
         stateCounter = 0
+        startCell = getRawCell(boxCoordinates)
+        bestAncestor = {startKey: startCell}
         heuristic = calculateHeuristic(boxCoordinates, distanceStack, goalState, heuristicCache, hotspotDictionary)
-        heapq.heappush(frontier, (heuristic, -stateCounter, startKey))
+        mobility = countMobility(boxCoordinates, startReachable, neighbors)
+        heapq.heappush(cellQueues[startCell], (heuristic, -mobility, -stateCounter, startKey))
         stateCounter += 1
 
-        while frontier:
-            _, _, currentKey = heapq.heappop(frontier)
-            currentPlayerPos, currentBoxCoords, reachable = stateByKey[currentKey]
+        while cellQueues:
+            for cellKey in list(cellQueues.keys()):
+                cellHeap = cellQueues.get(cellKey)
+                if not cellHeap:
+                    cellQueues.pop(cellKey, None)
+                    continue
+                _, _, _, currentKey = heapq.heappop(cellHeap)
+                if not cellHeap:
+                    del cellQueues[cellKey]
 
-            if currentBoxCoords == goalState:
-                transitions = []
-                key = currentKey
-                while parents[key] is not None:
-                    previousKey, standingTile, pushDirection, pushCount = parents[key]
-                    transitions.append((previousKey, standingTile, pushDirection, pushCount))
-                    key = previousKey
-                transitions.reverse()
+                currentPlayerPos, currentBoxCoords, reachable = stateByKey[currentKey]
+                currentBestAncestor = bestAncestor[currentKey]
 
-                winPath = []
-                for previousKey, standingTile, pushDirection, pushCount in transitions:
-                    previousPlayer, previousBoxes, idc = stateByKey[previousKey]
-                    walk = findWalkingPath(
-                        previousPlayer, standingTile, previousBoxes, neighbors
+                if currentBoxCoords == goalState:
+                    transitions = []
+                    key = currentKey
+                    while parents[key] is not None:
+                        previousKey, standingTile, pushDirection, pushCount = parents[key]
+                        transitions.append((previousKey, standingTile, pushDirection, pushCount))
+                        key = previousKey
+                    transitions.reverse()
+
+                    winPath = []
+                    for previousKey, standingTile, pushDirection, pushCount in transitions:
+                        previousPlayer, previousBoxes, idc = stateByKey[previousKey]
+                        walk = findWalkingPath(
+                            previousPlayer, standingTile, previousBoxes, neighbors
+                        )
+                        if walk is None:
+                            raise RuntimeError('Invalid reconstructed push path')
+                        winPath.extend(walk)
+                        winPath.append(DIRECTIONS[pushDirection]*pushCount)
+
+                    print(f"Total states explored: {len(explored)}")
+                    distinct = {key[1] for key in explored}
+                    print(f"Total unique box configurations explored: {len(distinct)}")
+                    return ''.join(winPath)
+
+                boxesToExplore = currentBoxCoords
+                exploredCorral = set()
+
+                #only start a corral from the tile right behind a box the player can push right now
+                #a pi corral always has one of these, so flooding any other pocket is just wasted work
+                corralSeeds = set()
+                for box in currentBoxCoords:
+                    for destRow, destCol in DIRECTION:
+                        standingTile = (box[0] - destRow, box[1] - destCol)
+                        boxDestination = (box[0] + destRow, box[1] + destCol)
+                        if standingTile in reachable and boxDestination in validBoxTiles:
+                            if boxDestination not in reachable and boxDestination not in currentBoxCoords:
+                                corralSeeds.add(boxDestination)
+
+                for currentPos in corralSeeds:
+                    if currentPos in exploredCorral:
+                        continue
+                    corral, corralBoxes = getCorralFromTile(currentPos, currentBoxCoords, neighbors)
+                    exploredCorral.update(corral)
+
+                    #no boxes or every box in the corral means restricting to it prunes nothing
+                    if not corralBoxes or len(corralBoxes) == len(currentBoxCoords):
+                        continue
+
+                    #every box is already on a goal and theres no empty goal inside, so nothing to do here
+                    if corralBoxes.issubset(goalState) and corral.isdisjoint(goalState):
+                        continue
+
+                    isPIC, _, totalBoxes = isPICorral(
+                        corral, corralBoxes, reachable, currentBoxCoords, walls, validBoxTiles
                     )
-                    if walk is None:
-                        raise RuntimeError('Invalid reconstructed push path')
-                    winPath.extend(walk)
-                    winPath.append(DIRECTIONS[pushDirection]*pushCount)
 
-                print(f"Total states explored: {len(explored)}")
-                distinct = {key[1] for key in explored}
-                print(f"Total unique box configurations explored: {len(distinct)}")
-                return ''.join(winPath)
+                    if isPIC:
+                        boxesToExplore = totalBoxes
+                        break
 
-            boxesToExplore = currentBoxCoords
-            exploredCorral = set()
+                statesMade = 0
+                for box in boxesToExplore:
+                    macroFrontier = [(currentKey, box, currentBoxCoords, reachable)]
+                    for macroParentKey, currentBox, macroBoxCoords, macroReachable in macroFrontier:
+                        for destRow, destCol in DIRECTION:
+                            standingTile = (currentBox[0] - destRow, currentBox[1] - destCol)
 
-            #only start a corral from the tile right behind a box the player can push right now
-            #a pi corral always has one of these, so flooding any other pocket is just wasted work
-            corralSeeds = set()
-            for box in currentBoxCoords:
-                for destRow, destCol in DIRECTION:
-                    standingTile = (box[0] - destRow, box[1] - destCol)
-                    boxDestination = (box[0] + destRow, box[1] + destCol)
-                    if standingTile in reachable and boxDestination in validBoxTiles:
-                        if boxDestination not in reachable and boxDestination not in currentBoxCoords:
-                            corralSeeds.add(boxDestination)
+                            #If we cant reach the position of the player after pushing the box, cant push so prune
+                            if standingTile not in macroReachable:
+                                continue
 
-            for currentPos in corralSeeds:
-                if currentPos in exploredCorral:
-                    continue
-                corral, corralBoxes = getCorralFromTile(currentPos, currentBoxCoords, neighbors)
-                exploredCorral.update(corral)
+                            boxDestination = (currentBox[0] + destRow, currentBox[1] + destCol)
 
-                #no boxes or every box in the corral means restricting to it prunes nothing
-                if not corralBoxes or len(corralBoxes) == len(currentBoxCoords):
-                    continue
+                            #if pushing into a wall, a simple deadlock or another box, prune
+                            if boxDestination not in validBoxTiles or boxDestination in macroBoxCoords:
+                                continue
 
-                #every box is already on a goal and theres no empty goal inside, so nothing to do here
-                if corralBoxes.issubset(goalState) and corral.isdisjoint(goalState):
-                    continue
+                            #after the push the player ends up where the box was
+                            newPlayerPos = currentBox
+                            newBoxCoords = (macroBoxCoords - {currentBox}) | {boxDestination}
+                            pushDirection = (destRow, destCol)
+                            pushCount = 1
+                            movingBox = boxDestination
+                            #keep pushing the box through the tunnel until it comes out the other side or hits something
+                            while (movingBox, pushDirection) in tunnelTiles:
+                                nextBox = (movingBox[0] + destRow, movingBox[1] + destCol)
+                                if nextBox not in validBoxTiles or nextBox in newBoxCoords:
+                                    break
+                                newBoxCoords = (newBoxCoords - {movingBox}) | {nextBox}
+                                newPlayerPos = movingBox
+                                movingBox = nextBox
+                                pushCount += 1
+                            boxDestination = movingBox
 
-                isPIC, _, totalBoxes = isPICorral(
-                    corral, corralBoxes, reachable, currentBoxCoords, walls, validBoxTiles
-                )
+                            alreadyExplored = False
+                            #if the boxes positions have been seen before
+                            if newBoxCoords in exploredReigons:
+                                #if the player is in the same "room/reigon" then its the exact same state, so prune 
+                                for exploredRegion in exploredReigons[newBoxCoords]:
+                                    if newPlayerPos in exploredRegion:
+                                        alreadyExplored = True
+                                        break
+                            #same as above
+                            if alreadyExplored:
+                                continue
 
-                if isPIC:
-                    boxesToExplore = totalBoxes
-                    break
+                            #check the freeze deadlocks first so we dont waste time on the heuristic of a dead state
+                            if hasFreezeSubset(boxDestination, newBoxCoords, freezeSubset):
+                                continue
 
-            statesMade = 0
-            for box in boxesToExplore:
-                for destRow, destCol in DIRECTION:
-                    standingTile = (box[0] - destRow, box[1] - destCol)
+                            freezeExplored = dict()
+                            exploring = set()
+                            frozenBoxes = detectBlockedAxes(boxDestination, mapData, width, height, deadLockTable, freezeExplored, newBoxCoords, exploring)
+                            if boxDestination in frozenBoxes and any(b not in goalState for b in frozenBoxes):
+                                if len(frozenBoxes) <= 4:
+                                    frozenPattern = frozenset(frozenBoxes)
+                                    #save the pattern under every box in it so hasFreezeSubset only has to check the pushed box
+                                    for frozenBox in frozenPattern:
+                                        freezeSubset[frozenBox].append(frozenPattern)
+                                continue
 
-                    #If we cant reach the position of the player after pushing the box, cant push so prune
-                    if standingTile not in reachable:
-                        continue
+                            heuristic = calculateHeuristic(newBoxCoords, distanceStack, goalState, heuristicCache, hotspotDictionary)
 
-                    boxDestination = (box[0] + destRow, box[1] + destCol)
+                            if heuristic >= 999999:
+                                continue
 
-                    #if pushing into a wall, a simple deadlock or another box, prune
-                    if boxDestination not in validBoxTiles or boxDestination in currentBoxCoords:
-                        continue
+                            newReachable, newMinimum = reachablePlayerTiles(newPlayerPos, newBoxCoords, neighbors)
 
-                    #after the push the player ends up where the box was
-                    newPlayerPos = box
-                    newBoxCoords = (currentBoxCoords - {box}) | {boxDestination}
-                    pushDirection = (destRow, destCol)
-                    pushCount = 1
-                    movingBox = boxDestination
-                    #keep pushing the box through the tunnel until it comes out the other side or hits something
-                    while (movingBox, pushDirection) in tunnelTiles:
-                        nextBox = (movingBox[0] + destRow, movingBox[1] + destCol)
-                        if nextBox not in validBoxTiles or nextBox in newBoxCoords:
-                            break
-                        newBoxCoords = (newBoxCoords - {movingBox}) | {nextBox}
-                        newPlayerPos = movingBox
-                        movingBox = nextBox
-                        pushCount += 1
-                    boxDestination = movingBox
+                            #if the boxes positions have not been seen before
+                            if newBoxCoords not in exploredReigons:
+                                exploredReigons[newBoxCoords] = []
+                            #add the new reachable region to the list of explored regions for this box configuration
+                            exploredReigons[newBoxCoords].append(newReachable)
 
-                    alreadyExplored = False
-                    #if the boxes positions have been seen before
-                    if newBoxCoords in exploredReigons:
-                        #if the player is in the same "room/reigon" then its the exact same state, so prune 
-                        for exploredRegion in exploredReigons[newBoxCoords]:
-                            if newPlayerPos in exploredRegion:
-                                alreadyExplored = True
-                                break
-                    #same as above
-                    if alreadyExplored:
-                        continue
+                            newState = (newPlayerPos, newBoxCoords, newReachable)
+                            newKey = stateKey(newState, newMinimum)
+          
+                            explored.add(newKey)
+                            parents[newKey] = (macroParentKey, standingTile, (destRow, destCol), pushCount)
+                            stateByKey[newKey] = newState
 
-                    #check the freeze deadlocks first so we dont waste time on the heuristic of a dead state
-                    if hasFreezeSubset(boxDestination, newBoxCoords, freezeSubset):
-                        continue
+                            rawCell = getRawCell(newBoxCoords)
+                            projectedCell, newBestAncestor = getProjectedCell(rawCell, currentBestAncestor)
+                            bestAncestor[newKey] = newBestAncestor
+                            mobility = countMobility(newBoxCoords, newReachable, neighbors)
 
-                    freezeExplored = dict()
-                    exploring = set()
-                    frozenBoxes = detectBlockedAxes(boxDestination, mapData, width, height, deadLockTable, freezeExplored, newBoxCoords, exploring)
-                    if boxDestination in frozenBoxes and any(b not in goalState for b in frozenBoxes):
-                        if len(frozenBoxes) <= 4:
-                            frozenPattern = frozenset(frozenBoxes)
-                            #save the pattern under every box in it so hasFreezeSubset only has to check the pushed box
-                            for frozenBox in frozenPattern:
-                                freezeSubset[frozenBox].append(frozenPattern)
-                        continue
-
-                    heuristic = calculateHeuristic(newBoxCoords, distanceStack, goalState, heuristicCache, hotspotDictionary)
-
-                    if heuristic >= 999999:
-                        continue
-
-                    newReachable, newMinimum = reachablePlayerTiles(newPlayerPos, newBoxCoords, neighbors)
-
-                    #if the boxes positions have not been seen before
-                    if newBoxCoords not in exploredReigons:
-                        exploredReigons[newBoxCoords] = []
-                    #add the new reachable region to the list of explored regions for this box configuration
-                    exploredReigons[newBoxCoords].append(newReachable)
-
-                    newState = (newPlayerPos, newBoxCoords, newReachable)
-                    newKey = stateKey(newState, newMinimum)
-  
-                    explored.add(newKey)
-                    parents[newKey] = (currentKey, standingTile, (destRow, destCol), pushCount)
-                    stateByKey[newKey] = newState
-
-                    #negative counter so ties pop the newest state first, keeps following 1 push line instead of jumping around
-                    heapq.heappush(frontier, (heuristic, -stateCounter, newKey))
-                    stateCounter += 1
-                    statesMade += 1
+                            #negative counter so ties pop the newest state first, keeps following 1 push line instead of jumping around
+                            heapq.heappush(cellQueues[projectedCell], (heuristic, -mobility, -stateCounter, newKey))
+                            stateCounter += 1
+                            statesMade += 1
+                            macroFrontier.append((newKey, boxDestination, newBoxCoords, newReachable))
 
         return ""
 
@@ -681,8 +714,12 @@ class SokoBot:
 def getOOPBoxes():
     return 0
 
-def getPackedBoxes():
-    return 0
+def getPackedBoxes(boxCoordinates, goalState):
+    packed = 0
+    for box in boxCoordinates:
+        if box in goalState:
+            packed += 1
+    return packed
 
 def countRegions(mapData, width, height, boxes):
     explored = set()
@@ -704,9 +741,7 @@ def countRegions(mapData, width, height, boxes):
             frontier = [currentPos]
             explored.add(currentPos)
 
-            while frontier:
-                currentRow, currentCol = frontier.pop(0)
-
+            for currentRow, currentCol in frontier:
                 for rowY, colX in DIRECTION:
                     dest = (currentRow + rowY, currentCol + colX)
                     
@@ -795,3 +830,56 @@ def generateRoomsAndGraph(interiorTiles):
                         frontier.append(dest)
 
     return rooms, roomGraph, tileToRoom
+
+def countRoomConnectivity(boxes, rooms, roomGraph, tileToRoom, neighbors):
+    brokenEdges = 0
+
+    for roomId, roomTiles in enumerate(rooms):
+        if not roomGraph[roomId]:
+            continue
+
+        exploredRoom = set()
+
+        for startPos in roomTiles:
+            if startPos in boxes or startPos in exploredRoom:
+                continue
+
+            frontier = [startPos]
+            explored = {startPos}
+            exploredRoom.add(startPos)
+            connectedRooms = set()
+
+            for currentPos in frontier:
+                for dest in neighbors[currentPos]:
+                    if dest not in boxes and dest not in explored:
+                        explored.add(dest)
+
+                        if dest in tileToRoom:
+                            neighborRoom = tileToRoom[dest]
+                            if neighborRoom == roomId:
+                                exploredRoom.add(dest)
+                                frontier.append(dest)
+                            else:
+                                connectedRooms.add(neighborRoom)
+                        else:
+                            frontier.append(dest)
+
+            brokenEdges += len(roomGraph[roomId]) - len(connectedRooms)
+
+        if not exploredRoom:
+            brokenEdges += len(roomGraph[roomId])
+
+    return brokenEdges
+
+def countMobility(boxCoordinates, reachable, neighbors):
+    mobility = 0
+    for box in boxCoordinates:
+        for dest in neighbors[box]:
+            if dest in reachable:
+                mobility += 1
+    return mobility
+
+def getProjectedCell(rawCell, bestAncestorCell):
+    if rawCell < bestAncestorCell:
+        return rawCell, rawCell
+    return bestAncestorCell, bestAncestorCell

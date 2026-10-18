@@ -274,39 +274,6 @@ def calculateHeuristic(boxCoordinates, distanceMatrices, goalState, heuristicCac
     heuristicCache[boxCoordinates] = heuristic
     return heuristic
 
-def countRegions(mapData, width, height, boxes):
-    explored = set()
-    rooms = 0
-
-    #For every single node in the map
-    for row in range(height):
-        for col in range(width):
-            currentPos = (row, col)
-            
-            #If its a wall, a box, or already explored, then skip it
-            if not isValid(currentPos, mapData, width, height) or currentPos in boxes or currentPos in explored:
-                continue
-
-            #Else, new "room" so basically fill the reigon then increment our room counter
-            rooms += 1
-            
-            #everything below is just standard flood fill bfs
-            frontier = [currentPos]
-            explored.add(currentPos)
-
-            while frontier:
-                currentRow, currentCol = frontier.pop(0)
-
-                for rowY, colX in DIRECTION:
-                    dest = (currentRow + rowY, currentCol + colX)
-                    
-                    if isValid(dest, mapData, width, height) and dest not in boxes and dest not in explored:
-                        explored.add(dest)
-                        frontier.append(dest)
-                        
-    # Return the number of rooms found
-    return rooms
-
 def reachablePlayerTiles(playerPosition, boxCoordinates, neighbors):
     frontier = [playerPosition]
     reachable = {playerPosition}
@@ -404,85 +371,6 @@ def detectTunnelSquares(interiorTiles, goalState, walls):
             if prevTile in interiorTiles and tile not in goalState and all(side in walls for side in tileSides) and all(side in walls for side in prevSides):
                 tunnelSquares.add((tile, (deltaRow, deltaCol)))
     return tunnelSquares
-
-def generateRoomsAndGraph(interiorTiles):
-    #find 2x3 and 3x2 rectangles
-    roomTiles = set()
-    for row, col in interiorTiles:
-        twoByThree = {(row, col), (row, col+1), (row, col+2), (row+1, col), (row+1, col+1), (row+1, col+2)}
-        threeByTwo = {(row, col), (row+1, col), (row+2, col), (row, col+1), (row+1, col+1), (row+2, col+1)}
-
-        if twoByThree.issubset(interiorTiles):
-            roomTiles.update(twoByThree)
-        if threeByTwo.issubset(interiorTiles):
-            roomTiles.update(threeByTwo)
-
-    # roomTiles is just one big set of tiles, to aggregate them into separate rooms
-    # do a flood fill bfs, every tile connected to eachother is in the same room
-    # it checks the 4 directions manually and checks if that tile exists in the same set,
-    # if yes append to same room
-    # if no continue
-    # Imagine ms paint bucket, theyre separated by corridor tiles.
-    # code below just aggregates the tiles into rooms
-    rooms = []
-    tileToRoom = {}
-    
-    #destructively popping from roomTiles means we dont need an explored set
-    while roomTiles:
-        startPos = roomTiles.pop()
-        roomId = len(rooms)
-        currentRoom = {startPos}
-        frontier = [startPos]
-        tileToRoom[startPos] = roomId
-        # roomID and tile to room is baically just answering
-        # which room does this tile belong to in O(1) time
-
-        #looping over a list that keeps growing is faster than popleft on a deque
-        #each frontier loop is 1 room
-        for currentPos in frontier:
-            for destRow, destCol in DIRECTION:
-                dest = (currentPos[0] + destRow, currentPos[1] + destCol)
-                
-                if dest in roomTiles:
-                    roomTiles.remove(dest)
-                    currentRoom.add(dest)
-                    tileToRoom[dest] = roomId
-                    frontier.append(dest)
-        
-        rooms.append(currentRoom)
-
-    # Were just declaring the adj list, no assignment
-    # just saying for every room create a set of other rooms adjacent/connected to it
-    roomGraph = {id: set() for id in range(len(rooms))}
-
-    # RoomID is synonymous with the index
-    # Were now assigning rooms to the adj list
-    for roomId, roomTiles in enumerate(rooms):
-        #the entire room acts as the starting footprint
-        frontier = list(roomTiles)
-        #explored is a room check and explored corridor tile check in 1
-        explored = set(roomTiles)
-
-        # for every tile in the room, check the 4 directions
-        for currentPos in frontier:
-            for destRow, destCol in DIRECTION:
-                dest = (currentPos[0] + destRow, currentPos[1] + destCol)
-                # Its not a tile in the room
-                if dest in interiorTiles and dest not in explored:
-                    explored.add(dest)
-
-                    # if we found a different room, find which room that tile is in, and add it to the adj list value of the current room
-                    if dest in tileToRoom:
-                        #we hit a different room so record the edge
-                        neighborRoom = tileToRoom[dest]
-                        roomGraph[roomId].add(neighborRoom)
-                        roomGraph[neighborRoom].add(roomId)
-                        #do not add dest to frontier so we dont walk through the neighbor room
-                    else:
-                        #its a corridor tile so keep flooding outward
-                        frontier.append(dest)
-
-    return rooms, roomGraph, tileToRoom
 
 def generateHotspotTable(goalState, interiorTiles, validBoxTiles, neighbors):
     def getReachableGoalsCount(hotspotTile):
@@ -788,3 +676,122 @@ class SokoBot:
                     statesMade += 1
 
         return ""
+
+
+def getOOPBoxes():
+    return 0
+
+def getPackedBoxes():
+    return 0
+
+def countRegions(mapData, width, height, boxes):
+    explored = set()
+    rooms = 0
+
+    #For every single node in the map
+    for row in range(height):
+        for col in range(width):
+            currentPos = (row, col)
+            
+            #If its a wall, a box, or already explored, then skip it
+            if not isValid(currentPos, mapData, width, height) or currentPos in boxes or currentPos in explored:
+                continue
+
+            #Else, new "room" so basically fill the reigon then increment our room counter
+            rooms += 1
+            
+            #everything below is just standard flood fill bfs
+            frontier = [currentPos]
+            explored.add(currentPos)
+
+            while frontier:
+                currentRow, currentCol = frontier.pop(0)
+
+                for rowY, colX in DIRECTION:
+                    dest = (currentRow + rowY, currentCol + colX)
+                    
+                    if isValid(dest, mapData, width, height) and dest not in boxes and dest not in explored:
+                        explored.add(dest)
+                        frontier.append(dest)
+                        
+    # Return the number of rooms found
+    return rooms
+
+def generateRoomsAndGraph(interiorTiles):
+    #find 2x3 and 3x2 rectangles
+    roomTiles = set()
+    for row, col in interiorTiles:
+        twoByThree = {(row, col), (row, col+1), (row, col+2), (row+1, col), (row+1, col+1), (row+1, col+2)}
+        threeByTwo = {(row, col), (row+1, col), (row+2, col), (row, col+1), (row+1, col+1), (row+2, col+1)}
+
+        if twoByThree.issubset(interiorTiles):
+            roomTiles.update(twoByThree)
+        if threeByTwo.issubset(interiorTiles):
+            roomTiles.update(threeByTwo)
+
+    # roomTiles is just one big set of tiles, to aggregate them into separate rooms
+    # do a flood fill bfs, every tile connected to eachother is in the same room
+    # it checks the 4 directions manually and checks if that tile exists in the same set,
+    # if yes append to same room
+    # if no continue
+    # Imagine ms paint bucket, theyre separated by corridor tiles.
+    # code below just aggregates the tiles into rooms
+    rooms = []
+    tileToRoom = {}
+    
+    #destructively popping from roomTiles means we dont need an explored set
+    while roomTiles:
+        startPos = roomTiles.pop()
+        roomId = len(rooms)
+        currentRoom = {startPos}
+        frontier = [startPos]
+        tileToRoom[startPos] = roomId
+        # roomID and tile to room is baically just answering
+        # which room does this tile belong to in O(1) time
+
+        #looping over a list that keeps growing is faster than popleft on a deque
+        #each frontier loop is 1 room
+        for currentPos in frontier:
+            for destRow, destCol in DIRECTION:
+                dest = (currentPos[0] + destRow, currentPos[1] + destCol)
+                
+                if dest in roomTiles:
+                    roomTiles.remove(dest)
+                    currentRoom.add(dest)
+                    tileToRoom[dest] = roomId
+                    frontier.append(dest)
+        
+        rooms.append(currentRoom)
+
+    # Were just declaring the adj list, no assignment
+    # just saying for every room create a set of other rooms adjacent/connected to it
+    roomGraph = {id: set() for id in range(len(rooms))}
+
+    # RoomID is synonymous with the index
+    # Were now assigning rooms to the adj list
+    for roomId, roomTiles in enumerate(rooms):
+        #the entire room acts as the starting footprint
+        frontier = list(roomTiles)
+        #explored is a room check and explored corridor tile check in 1
+        explored = set(roomTiles)
+
+        # for every tile in the room, check the 4 directions
+        for currentPos in frontier:
+            for destRow, destCol in DIRECTION:
+                dest = (currentPos[0] + destRow, currentPos[1] + destCol)
+                # Its not a tile in the room
+                if dest in interiorTiles and dest not in explored:
+                    explored.add(dest)
+
+                    # if we found a different room, find which room that tile is in, and add it to the adj list value of the current room
+                    if dest in tileToRoom:
+                        #we hit a different room so record the edge
+                        neighborRoom = tileToRoom[dest]
+                        roomGraph[roomId].add(neighborRoom)
+                        roomGraph[neighborRoom].add(roomId)
+                        #do not add dest to frontier so we dont walk through the neighbor room
+                    else:
+                        #its a corridor tile so keep flooding outward
+                        frontier.append(dest)
+
+    return rooms, roomGraph, tileToRoom

@@ -456,6 +456,51 @@ def countHotspots(boxCoordinates, hotspotDictionary):
             hotspots += 1
     return hotspots
 
+def findGoalMacro(playerPos, box, otherBoxes, goal, reachable, validBoxTiles, neighbors, maxPushes=6, maxStates=120):
+    if box == goal:
+        return None
+    start = (playerPos, box)
+    frontier = deque([(playerPos, box, reachable, 0)])
+    parents = {start: None}
+    seen = {(box, min(reachable))}
+
+    while frontier and len(seen) <= maxStates:
+        currentPlayer, currentBox, currentReachable, depth = frontier.popleft()
+        if depth >= maxPushes:
+            continue
+        occupied = otherBoxes | {currentBox}
+        for dr, dc in DIRECTION:
+            standing = (currentBox[0] - dr, currentBox[1] - dc)
+            destination = (currentBox[0] + dr, currentBox[1] + dc)
+            if standing not in currentReachable or destination not in validBoxTiles or destination in occupied:
+                continue
+
+            nextPlayer = currentBox
+            nextState = (nextPlayer, destination)
+            if nextState in parents:
+                continue
+            parents[nextState] = ((currentPlayer, currentBox), standing, (dr, dc))
+            if destination == goal:
+                steps = []
+                key = nextState
+                while parents[key] is not None:
+                    previous, stepStanding, stepDirection = parents[key]
+                    steps.append((stepStanding, stepDirection, 1))
+                    key = previous
+                steps.reverse()
+                return nextPlayer, frozenset(otherBoxes | {destination}), tuple(steps)
+
+            nextReachable, nextMinimum = reachablePlayerTiles(nextPlayer, otherBoxes | {destination}, neighbors)
+            regionKey = (destination, nextMinimum)
+            if regionKey in seen:
+                continue
+            seen.add(regionKey)
+            if len(seen) > maxStates:
+                break
+            frontier.append((nextPlayer, destination, nextReachable, depth + 1))
+    return None
+
+
 class SokoBot:
     def solveSokobanPuzzle(self, width, height, mapData, itemsData):
         goalState = []
@@ -510,6 +555,7 @@ class SokoBot:
         startReachable, startMinimum = reachablePlayerTiles(playerPosition, boxCoordinates, neighbors)
         startState = (playerPosition, boxCoordinates, startReachable)
         tunnelTiles = detectTunnelSquares(interiorTiles, goalState, walls)
+        cornerGoals = frozenset(goal for goal in goalState if sum((goal[0] + dr, goal[1] + dc) in walls for dr, dc in DIRECTION) >= 2)
 
         def stateKey(state, minimumCell):
             return (minimumCell, state[1])
@@ -542,13 +588,21 @@ class SokoBot:
                 winPath = []
                 for previousKey, standingTile, pushDirection, pushCount in transitions:
                     previousPlayer, previousBoxes, idc = stateByKey[previousKey]
-                    walk = findWalkingPath(
-                        previousPlayer, standingTile, previousBoxes, neighbors
-                    )
-                    if walk is None:
-                        raise RuntimeError('Invalid reconstructed push path')
-                    winPath.extend(walk)
-                    winPath.append(DIRECTIONS[pushDirection]*pushCount)
+                    steps = pushDirection if standingTile is None else ((standingTile, pushDirection, pushCount),)
+                    for stepStanding, stepDirection, stepCount in steps:
+                        walk = findWalkingPath(
+                            previousPlayer, stepStanding, previousBoxes, neighbors
+                        )
+                        if walk is None:
+                            raise RuntimeError('Invalid reconstructed push path')
+                        winPath.extend(walk)
+                        winPath.append(DIRECTIONS[stepDirection]*stepCount)
+                        previousPlayer = (stepStanding[0] + stepDirection[0] * stepCount,
+                                          stepStanding[1] + stepDirection[1] * stepCount)
+                        pushedBox = (stepStanding[0] + stepDirection[0], stepStanding[1] + stepDirection[1])
+                        lastBox = (pushedBox[0] + stepDirection[0] * stepCount,
+                                   pushedBox[1] + stepDirection[1] * stepCount)
+                        previousBoxes = frozenset((previousBoxes - {pushedBox}) | {lastBox})
 
                 print(f"Total states explored: {len(explored)}")
                 distinct = {key[1] for key in explored}
@@ -592,6 +646,40 @@ class SokoBot:
                     break
 
             statesMade = 0
+            for macroBox in boxesToExplore:
+                otherBoxes = frozenset(currentBoxCoords - {macroBox})
+                for targetGoal in cornerGoals - currentBoxCoords:
+                    staticDistance = distances[targetGoal][macroBox[0]][macroBox[1]]
+                    if staticDistance < 2 or staticDistance > 6:
+                        continue
+                    macro = findGoalMacro(currentPlayerPos, macroBox, otherBoxes, targetGoal,
+                                          reachable, validBoxTiles, neighbors)
+                    if macro is None:
+                        continue
+                    macroPlayer, macroBoxes, macroSteps = macro
+                    if any(macroPlayer in region for region in exploredReigons.get(macroBoxes, ())):
+                        continue
+                    if hasFreezeSubset(targetGoal, macroBoxes, freezeSubset):
+                        continue
+                    macroFrozen = detectBlockedAxes(targetGoal, mapData, width, height,
+                                                    deadLockTable, {}, macroBoxes, set())
+                    if targetGoal in macroFrozen and any(b not in goalState for b in macroFrozen):
+                        continue
+                    macroHeuristic = calculateHeuristic(macroBoxes, distanceStack, goalState, heuristicCache, hotspotDictionary)
+                    if macroHeuristic >= 999999:
+                        continue
+                    macroReachable, macroMinimum = reachablePlayerTiles(macroPlayer, macroBoxes, neighbors)
+                    macroState = (macroPlayer, macroBoxes, macroReachable)
+                    macroKey = stateKey(macroState, macroMinimum)
+                    if macroKey in explored:
+                        continue
+                    exploredReigons.setdefault(macroBoxes, []).append(macroReachable)
+                    explored.add(macroKey)
+                    parents[macroKey] = (currentKey, None, macroSteps, 0)
+                    stateByKey[macroKey] = macroState
+                    heapq.heappush(frontier, (macroHeuristic, -stateCounter, macroKey))
+                    stateCounter += 1
+                    statesMade += 1
             for box in boxesToExplore:
                 for destRow, destCol in DIRECTION:
                     standingTile = (box[0] - destRow, box[1] - destCol)

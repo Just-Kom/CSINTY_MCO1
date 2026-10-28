@@ -9,7 +9,7 @@ class SokoBot:
         self.solverDir = Path(__file__).resolve().parent
         self.cppPath = self.solverDir / "sokobot.cpp"
         self.dllPath = self.solverDir / "sokobot_cpp.dll"
-        self.exePath = self.solverDir / "sokobot_cpp.exe"
+        self.exePath = self.solverDir / "sokobot_cpp"
         self.cppLib = None
         self._loadSolver()
 

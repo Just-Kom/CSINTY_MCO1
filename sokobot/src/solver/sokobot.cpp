@@ -985,7 +985,7 @@ int main() {
         width, height, mapData, itemsData
     );
 
-    cout << solution << endl;
+    cout << "SOLUTION:" << solution << endl;
 
     return 0;
 }

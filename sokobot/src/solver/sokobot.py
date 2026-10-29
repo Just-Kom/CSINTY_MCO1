@@ -14,6 +14,26 @@ class SokoBot:
         self._loadSolver()
 
     def _loadSolver(self):
+        if self.cppPath.exists():
+            cppMtime = self.cppPath.stat().st_mtime
+            if not self.dllPath.exists() or cppMtime > self.dllPath.stat().st_mtime:
+                subprocess.run(
+                    [
+                        "g++",
+                        "-O3",
+                        "-march=native",
+                        "-flto",
+                        "-DNDEBUG",
+                        "-std=c++20",
+                        "-shared",
+                        "-static",
+                        str(self.cppPath),
+                        "-o",
+                        str(self.dllPath),
+                    ],
+                    check=False,
+                )
+
         if self.dllPath.exists():
             try:
                 lib = ctypes.CDLL(str(self.dllPath))
@@ -22,7 +42,7 @@ class SokoBot:
                     ctypes.c_int,
                     ctypes.c_char_p,
                     ctypes.c_char_p,
-                    ctypes.c_double
+                    ctypes.c_double,
                 ]
                 lib.solve_puzzle_c.restype = ctypes.c_char_p
                 self.cppLib = lib
@@ -30,11 +50,24 @@ class SokoBot:
             except OSError:
                 self.cppLib = None
 
-        if not self.exePath.exists() and self.cppPath.exists():
-            subprocess.run(
-                ["g++", "-O3", "-std=c++20", "-static", str(self.cppPath), "-o", str(self.exePath)],
-                check=False
-            )
+        if self.cppPath.exists():
+            cppMtime = self.cppPath.stat().st_mtime
+            if not self.exePath.exists() or cppMtime > self.exePath.stat().st_mtime:
+                subprocess.run(
+                    [
+                        "g++",
+                        "-O3",
+                        "-march=native",
+                        "-flto",
+                        "-DNDEBUG",
+                        "-std=c++20",
+                        "-static",
+                        str(self.cppPath),
+                        "-o",
+                        str(self.exePath),
+                    ],
+                    check=False,
+                )
 
     def solveSokobanPuzzle(self, width, height, mapData, itemsData):
         timeLimit = float(os.environ.get("SOKOBOT_TIME_LIMIT", "0.0"))
@@ -56,7 +89,7 @@ class SokoBot:
             [str(self.exePath)],
             input=inputData,
             capture_output=True,
-            text=True
+            text=True,
         )
         solution = ""
         for line in proc.stdout.splitlines():

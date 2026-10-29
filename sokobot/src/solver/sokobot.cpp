@@ -2,13 +2,13 @@
 
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <cstddef>
+#include <cstdint>
 #include <cstdlib>
-#include <deque>
 #include <functional>
 #include <iostream>
 #include <limits>
-#include <list>
 #include <map>
 #include <optional>
 #include <queue>
@@ -17,11 +17,11 @@
 #include <string>
 #include <tuple>
 #include <unordered_map>
-#include <unordered_set>
 #include <utility>
 #include <vector>
 
 using namespace std;
+
 namespace {
 
 struct Position {
@@ -33,9 +33,16 @@ struct Position {
     }
 };
 
-
 Position operator+(Position a, Position b) { return {a.row + b.row, a.col + b.col}; }
 Position operator-(Position a, Position b) { return {a.row - b.row, a.col - b.col}; }
+
+inline int toTileIndex(Position p, int width) {
+    return p.row * width + p.col;
+}
+
+inline Position toPosition(int tileIndex, int width) {
+    return {tileIndex / width, tileIndex % width};
+}
 
 size_t hashCombine(size_t a, size_t b) {
     return a ^ (b + static_cast<size_t>(0x9e3779b97f4a7c15ULL) + (a << 6U) + (a >> 2U));
@@ -47,19 +54,153 @@ struct PositionHash {
     }
 };
 
-using TileSet = unordered_set<Position, PositionHash>;
-using Boxes = vector<Position>; 
-using Neighbors = unordered_map<Position, vector<Position>, PositionHash>;
+struct TileMask {
+    int width = 0;
+    int totalTiles = 0;
+    vector<uint64_t> words;
+
+    TileMask() = default;
+    TileMask(int widthVal, int totalTilesVal)
+        : width(widthVal),
+          totalTiles(totalTilesVal),
+          words(static_cast<size_t>((totalTilesVal + 63) / 64), 0ULL) {}
+
+    void insertIndex(int tileIndex) {
+        words[static_cast<size_t>(tileIndex >> 6)] |= (1ULL << (tileIndex & 63));
+    }
+
+    void insert(Position p) {
+        insertIndex(toTileIndex(p, width));
+    }
+
+    bool insertAndCheck(int tileIndex) {
+        uint64_t mask = 1ULL << (tileIndex & 63);
+        uint64_t& word = words[static_cast<size_t>(tileIndex >> 6)];
+        if ((word & mask) != 0ULL) return false;
+        word |= mask;
+        return true;
+    }
+
+    bool insertAndCheck(Position p) {
+        return insertAndCheck(toTileIndex(p, width));
+    }
+
+    bool erase(Position p) {
+        int tileIndex = toTileIndex(p, width);
+        uint64_t mask = 1ULL << (tileIndex & 63);
+        uint64_t& word = words[static_cast<size_t>(tileIndex >> 6)];
+        if ((word & mask) == 0ULL) return false;
+        word &= ~mask;
+        return true;
+    }
+
+    bool containsIndex(int tileIndex) const {
+        return (words[static_cast<size_t>(tileIndex >> 6)] & (1ULL << (tileIndex & 63))) != 0ULL;
+    }
+
+    bool containsPos(Position p) const {
+        return containsIndex(toTileIndex(p, width));
+    }
+
+    void insertAll(const TileMask& other) {
+        for (size_t i = 0; i < words.size(); ++i) {
+            words[i] |= other.words[i];
+        }
+    }
+
+    void clear() {
+        fill(words.begin(), words.end(), 0ULL);
+    }
+
+    bool empty() const {
+        for (uint64_t w : words) {
+            if (w != 0ULL) return false;
+        }
+        return true;
+    }
+
+    size_t size() const {
+        size_t count = 0;
+        for (uint64_t w : words) {
+            count += static_cast<size_t>(popcount(w));
+        }
+        return count;
+    }
+
+    Position firstPosition() const {
+        for (size_t i = 0; i < words.size(); ++i) {
+            if (words[i] != 0ULL) {
+                int bit = countr_zero(words[i]);
+                int idx = static_cast<int>(i * 64) + bit;
+                return toPosition(idx, width);
+            }
+        }
+        return {0, 0};
+    }
+
+    struct Iterator {
+        const TileMask* maskPtr = nullptr;
+        size_t wordIndex = 0;
+        uint64_t currentWord = 0ULL;
+
+        void advanceToNextWord() {
+            while (currentWord == 0ULL && maskPtr != nullptr && wordIndex < maskPtr->words.size()) {
+                currentWord = maskPtr->words[wordIndex++];
+            }
+        }
+
+        Position operator*() const {
+            int bit = countr_zero(currentWord);
+            int idx = static_cast<int>((wordIndex - 1) * 64) + bit;
+            return toPosition(idx, maskPtr->width);
+        }
+
+        Iterator& operator++() {
+            currentWord &= (currentWord - 1ULL);
+            if (currentWord == 0ULL) {
+                advanceToNextWord();
+            }
+            return *this;
+        }
+
+        bool operator==(const Iterator& other) const {
+            return currentWord == other.currentWord && wordIndex == other.wordIndex;
+        }
+
+        bool operator!=(const Iterator& other) const {
+            return !(*this == other);
+        }
+    };
+
+    Iterator begin() const {
+        Iterator it{this, 0, 0ULL};
+        it.advanceToNextWord();
+        return it;
+    }
+
+    Iterator end() const {
+        return Iterator{this, words.size(), 0ULL};
+    }
+};
+
+using TileSet = TileMask;
+using Boxes = vector<Position>;
+using Neighbors = vector<vector<Position>>;
 using Matrix = vector<vector<int>>;
-using DistanceMatrices = unordered_map<Position, Matrix, PositionHash>;
-using TileDistances = unordered_map<Position, vector<int>, PositionHash>;
-using HotspotDictionary = unordered_map<Position, TileSet, PositionHash>;
-using FreezeSubset = unordered_map<Position, set<Boxes>, PositionHash>;
+using DistanceMatrices = vector<Matrix>;
+using TileDistances = vector<vector<int>>;
+using HotspotDictionary = vector<TileMask>;
+using FreezeSubset = vector<vector<Boxes>>;
+using FeatureSpace = array<int, 3>;
 
 struct BoxesHash {
     size_t operator()(const Boxes& boxes) const {
         size_t result = 0;
-        for (Position p : boxes) result = hashCombine(result, PositionHash{}(p));
+        for (Position p : boxes) {
+            uint64_t packedPos = (static_cast<uint64_t>(static_cast<uint32_t>(p.row)) << 32U) |
+                                 static_cast<uint64_t>(static_cast<uint32_t>(p.col));
+            result = hashCombine(result, hash<uint64_t>{}(packedPos));
+        }
         return result;
     }
 };
@@ -70,24 +211,77 @@ struct State {
     bool operator==(const State&) const = default;
 };
 
-struct StateHash {
-    size_t operator()(const State& s) const {
-        return hashCombine(PositionHash{}(s.player), BoxesHash{}(s.boxes));
+struct Parent {
+    int previousStateId = -1;
+    Position standingTile{};
+    Position pushDirection{};
+    int pushCount = 0;
+};
+
+struct StateRecord {
+    State stateKey;
+    TileSet reachable;
+    FeatureSpace bestAncestor{};
+    Parent parent{};
+};
+
+struct HungarianScratch {
+    vector<long long> u;
+    vector<long long> v;
+    vector<int> p;
+    vector<int> way;
+    vector<long long> minv;
+    vector<uint8_t> used;
+    vector<const int*> rowPointers;
+
+    void prepare(int n, int m) {
+        if (static_cast<int>(u.size()) < n + 1) u.resize(static_cast<size_t>(n + 1));
+        if (static_cast<int>(v.size()) < m + 1) v.resize(static_cast<size_t>(m + 1));
+        if (static_cast<int>(p.size()) < m + 1) p.resize(static_cast<size_t>(m + 1));
+        if (static_cast<int>(way.size()) < m + 1) way.resize(static_cast<size_t>(m + 1));
+        if (static_cast<int>(minv.size()) < m + 1) minv.resize(static_cast<size_t>(m + 1));
+        if (static_cast<int>(used.size()) < m + 1) used.resize(static_cast<size_t>(m + 1));
+        fill(u.begin(), u.begin() + n + 1, 0LL);
+        fill(v.begin(), v.begin() + m + 1, 0LL);
+        fill(p.begin(), p.begin() + m + 1, 0);
+        fill(way.begin(), way.begin() + m + 1, 0);
     }
 };
 
-struct Parent {
-    State previousKey;
-    Position standingTile;
-    Position pushDirection;
-    int pushCount;
+struct BfsScratch {
+    vector<int> visitStamp;
+    int currentStamp = 0;
+    vector<Position> frontier;
+    vector<int> indexFrontier;
+    vector<int> parentTile;
+    vector<char> parentMove;
+
+    explicit BfsScratch(int totalTiles)
+        : visitStamp(static_cast<size_t>(totalTiles), 0),
+          parentTile(static_cast<size_t>(totalTiles), -1),
+          parentMove(static_cast<size_t>(totalTiles), 0) {
+        frontier.reserve(static_cast<size_t>(totalTiles));
+        indexFrontier.reserve(static_cast<size_t>(totalTiles));
+    }
+
+    int nextStamp() {
+        ++currentStamp;
+        if (currentStamp == numeric_limits<int>::max()) {
+            fill(visitStamp.begin(), visitStamp.end(), 0);
+            currentStamp = 1;
+        }
+        return currentStamp;
+    }
 };
 
 constexpr array<Position, 4> DIRECTION = {{{0, -1}, {0, 1}, {1, 0}, {-1, 0}}};
 constexpr array<array<Position, 2>, 2> AXES = {{{{{0, -1}, {0, 1}}},
-                                                            {{{1, 0}, {-1, 0}}}}};
+                                                {{{1, 0}, {-1, 0}}}}};
 
-bool contains(const TileSet& set, Position p) { return set.find(p) != set.end(); }
+bool contains(const TileSet& set, Position p) {
+    return set.containsPos(p);
+}
+
 bool contains(const Boxes& boxes, Position p) {
     return binary_search(boxes.begin(), boxes.end(), p);
 }
@@ -98,17 +292,27 @@ Boxes canonicalBoxes(Boxes result) {
     return result;
 }
 
-TileSet asTileSet(const Boxes& boxes) { return TileSet(boxes.begin(), boxes.end()); }
+TileSet asTileSet(const Boxes& boxes, int width, int totalTiles) {
+    TileSet mask(width, totalTiles);
+    for (Position p : boxes) mask.insert(p);
+    return mask;
+}
 
 bool subsetOf(const Boxes& subset, const Boxes& superset) {
     return includes(superset.begin(), superset.end(), subset.begin(), subset.end());
 }
+
 bool subsetOf(const TileSet& subset, const TileSet& superset) {
-    for (Position p : subset) if (!contains(superset, p)) return false;
+    for (size_t i = 0; i < subset.words.size(); ++i) {
+        if ((subset.words[i] & ~superset.words[i]) != 0ULL) return false;
+    }
     return true;
 }
+
 bool disjoint(const TileSet& a, const TileSet& b) {
-    for (Position p : a) if (contains(b, p)) return false;
+    for (size_t i = 0; i < a.words.size(); ++i) {
+        if ((a.words[i] & b.words[i]) != 0ULL) return false;
+    }
     return true;
 }
 
@@ -129,244 +333,297 @@ char directionChar(Position p) {
     throw logic_error("Invalid movement direction");
 }
 
+int directionIndex(Position p) {
+    if (p == Position{0, -1}) return 0;
+    if (p == Position{0, 1}) return 1;
+    if (p == Position{1, 0}) return 2;
+    return 3;
+}
+
 bool hasFreezeSubset(Position boxDestination, const Boxes& boxCoordinates,
-                     const FreezeSubset& freezeSubset) {
-    auto it = freezeSubset.find(boxDestination);
-    if (it == freezeSubset.end()) return false;
-    for (const Boxes& subset : it->second) {
+                     const FreezeSubset& freezeSubset, int width) {
+    const auto& subsets = freezeSubset[static_cast<size_t>(toTileIndex(boxDestination, width))];
+    for (const Boxes& subset : subsets) {
         if (subsetOf(subset, boxCoordinates)) return true;
     }
     return false;
 }
 
-optional<TileSet> detectBlockedAxes(
-    Position boxCoordinate, const TileSet& validBoxTiles, const TileSet& walls,
-    unordered_map<Position, bool, PositionHash>& explored,
-    const Boxes& boxCoordinates, TileSet& exploring) {
+bool detectBlockedAxes(
+    Position boxCoordinate,
+    const TileSet& validBoxTiles,
+    const TileSet& walls,
+    const TileSet& currentBoxesMask,
+    int width,
+    int height,
+    vector<uint8_t>& freezeState,
+    vector<int>& touchedFreezeTiles,
+    vector<Position>& frozenBoxesOut) {
 
-    function<bool(Position)> isFrozen = [&](Position currentBox) -> bool {
-        if (auto it = explored.find(currentBox); it != explored.end()) return it->second;
-        if (contains(exploring, currentBox)) return true;
+    for (int idx : touchedFreezeTiles) {
+        freezeState[static_cast<size_t>(idx)] = 0;
+    }
+    touchedFreezeTiles.clear();
+    frozenBoxesOut.clear();
+
+    auto isFrozen = [&](auto& self, Position currentBox) -> bool {
+        int currentIndex = toTileIndex(currentBox, width);
+        uint8_t status = freezeState[static_cast<size_t>(currentIndex)];
+        if (status == 2 || status == 1) return true;
+        if (status == 3) return false;
 
         array<bool, 2> blockedAxes = {false, false};
-        array<vector<Position>, 2> adjBoxesPerAxis;
+        array<array<Position, 2>, 2> adjBoxesPerAxis{};
+        array<int, 2> adjCount = {0, 0};
 
         for (size_t axisIndex = 0; axisIndex < AXES.size(); ++axisIndex) {
             int numOfSimpleDeadlocks = 0;
             for (Position direction : AXES[axisIndex]) {
                 Position dest = currentBox + direction;
-                if (contains(walls, dest)) {
+                if (dest.row < 0 || dest.row >= height || dest.col < 0 || dest.col >= width ||
+                    contains(walls, dest)) {
                     blockedAxes[axisIndex] = true;
                     break;
                 }
                 if (!contains(validBoxTiles, dest)) ++numOfSimpleDeadlocks;
-                if (contains(boxCoordinates, dest)) {
-                    if (contains(exploring, dest)) {
+                if (contains(currentBoxesMask, dest)) {
+                    int destIndex = toTileIndex(dest, width);
+                    if (freezeState[static_cast<size_t>(destIndex)] == 1) {
                         blockedAxes[axisIndex] = true;
                         break;
                     }
-                    adjBoxesPerAxis[axisIndex].push_back(dest);
+                    adjBoxesPerAxis[axisIndex][static_cast<size_t>(adjCount[axisIndex]++)] = dest;
                 }
             }
             if (!blockedAxes[axisIndex] && numOfSimpleDeadlocks == 2)
                 blockedAxes[axisIndex] = true;
-            if (!blockedAxes[axisIndex] && adjBoxesPerAxis[axisIndex].empty()) {
-                explored[currentBox] = false;
+            if (!blockedAxes[axisIndex] && adjCount[axisIndex] == 0) {
+                freezeState[static_cast<size_t>(currentIndex)] = 3;
+                touchedFreezeTiles.push_back(currentIndex);
                 return false;
             }
         }
 
-        auto savedExplored = explored;
-        exploring.insert(currentBox);
-        for (size_t axisIndex = 0; axisIndex < adjBoxesPerAxis.size(); ++axisIndex) {
+        size_t savedTouchedSize = touchedFreezeTiles.size();
+        freezeState[static_cast<size_t>(currentIndex)] = 1;
+        touchedFreezeTiles.push_back(currentIndex);
+
+        for (size_t axisIndex = 0; axisIndex < 2; ++axisIndex) {
             if (!blockedAxes[axisIndex]) {
-                for (Position adjBox : adjBoxesPerAxis[axisIndex]) {
-                    if (isFrozen(adjBox)) {
+                for (int i = 0; i < adjCount[axisIndex]; ++i) {
+                    if (self(self, adjBoxesPerAxis[axisIndex][static_cast<size_t>(i)])) {
                         blockedAxes[axisIndex] = true;
                         break;
                     }
                 }
             }
             if (!blockedAxes[axisIndex]) {
-                exploring.erase(currentBox);
-                explored = move(savedExplored);
-                explored[currentBox] = false;
+                while (touchedFreezeTiles.size() > savedTouchedSize) {
+                    int revertIdx = touchedFreezeTiles.back();
+                    touchedFreezeTiles.pop_back();
+                    freezeState[static_cast<size_t>(revertIdx)] = 0;
+                }
+                freezeState[static_cast<size_t>(currentIndex)] = 3;
+                touchedFreezeTiles.push_back(currentIndex);
                 return false;
             }
         }
-        exploring.erase(currentBox);
-        explored[currentBox] = true;
+
+        freezeState[static_cast<size_t>(currentIndex)] = 2;
         return true;
     };
 
-    if (!isFrozen(boxCoordinate)) return nullopt;
-    TileSet frozen;
-    for (const auto& [box, value] : explored) if (value) frozen.insert(box);
-    return frozen;
+    if (!isFrozen(isFrozen, boxCoordinate)) return false;
+    for (int idx : touchedFreezeTiles) {
+        if (freezeState[static_cast<size_t>(idx)] == 2) {
+            frozenBoxesOut.push_back(toPosition(idx, width));
+        }
+    }
+    return true;
 }
 
 DistanceMatrices generateDistanceMatrices(
     const Boxes& goalState, int height, int width, const TileSet& validBoxTiles,
-    const Neighbors& neighbors) {
-    DistanceMatrices matrices;
-    for (Position goalVal : goalState) {
-        Matrix matrix(height, vector<int>(width, -1));
-        matrix[goalVal.row][goalVal.col] = 0;
-        deque<pair<Position, int>> frontier = {{goalVal, 0}};
-        TileSet explored = {goalVal};
-        while (!frontier.empty()) {
-            auto [currentPos, currentCtr] = frontier.front();
-            frontier.pop_front();
+    const Neighbors& neighbors, BfsScratch& scratch) {
+    DistanceMatrices matrices(goalState.size());
+    for (size_t gIdx = 0; gIdx < goalState.size(); ++gIdx) {
+        Position goalVal = goalState[gIdx];
+        Matrix matrix(static_cast<size_t>(height), vector<int>(static_cast<size_t>(width), -1));
+        matrix[static_cast<size_t>(goalVal.row)][static_cast<size_t>(goalVal.col)] = 0;
+        int stamp = scratch.nextStamp();
+        int goalIdx = toTileIndex(goalVal, width);
+        scratch.visitStamp[static_cast<size_t>(goalIdx)] = stamp;
+        scratch.frontier.clear();
+        scratch.frontier.push_back(goalVal);
+
+        for (size_t i = 0; i < scratch.frontier.size(); ++i) {
+            Position currentPos = scratch.frontier[i];
+            int currentCtr = matrix[static_cast<size_t>(currentPos.row)][static_cast<size_t>(currentPos.col)];
             for (Position direction : DIRECTION) {
                 Position dest = currentPos + direction;
                 Position playerStand = dest + direction;
-                if (!contains(explored, dest) && contains(validBoxTiles, dest) &&
-                    find(neighbors.at(dest).begin(), neighbors.at(dest).end(), playerStand) != neighbors.at(dest).end()) {
-                    explored.insert(dest);
-                    int newCtr = currentCtr + 1;
-                    frontier.emplace_back(dest, newCtr);
-                    matrix[dest.row][dest.col] = newCtr;
+                if (dest.row < 0 || dest.row >= height || dest.col < 0 || dest.col >= width) continue;
+                int destIdx = toTileIndex(dest, width);
+                if (scratch.visitStamp[static_cast<size_t>(destIdx)] == stamp || !contains(validBoxTiles, dest))
+                    continue;
+                const auto& destNeighbors = neighbors[static_cast<size_t>(destIdx)];
+                if (find(destNeighbors.begin(), destNeighbors.end(), playerStand) != destNeighbors.end()) {
+                    scratch.visitStamp[static_cast<size_t>(destIdx)] = stamp;
+                    matrix[static_cast<size_t>(dest.row)][static_cast<size_t>(dest.col)] = currentCtr + 1;
+                    scratch.frontier.push_back(dest);
                 }
             }
         }
-        matrices.emplace(goalVal, move(matrix));
+        matrices[gIdx] = move(matrix);
     }
     return matrices;
 }
 
 TileDistances buildDistanceStack(const DistanceMatrices& distanceMatrices,
-                                 const Boxes& goalState, const TileSet& validBoxTiles) {
-    TileDistances tileDistances;
+                                 const Boxes& goalState, const TileSet& validBoxTiles,
+                                 int width, int totalTiles) {
+    TileDistances tileDistances(static_cast<size_t>(totalTiles));
     for (Position tile : validBoxTiles) {
-        vector<int> distances;
-        distances.reserve(goalState.size());
-        for (Position goalVal : goalState) {
-            int val = distanceMatrices.at(goalVal)[tile.row][tile.col];
-            distances.push_back(val == -1 ? 999999 : val);
+        vector<int> distances(goalState.size());
+        for (size_t gIdx = 0; gIdx < goalState.size(); ++gIdx) {
+            int val = distanceMatrices[gIdx][static_cast<size_t>(tile.row)][static_cast<size_t>(tile.col)];
+            distances[gIdx] = (val == -1 ? 999999 : val);
         }
-        tileDistances.emplace(tile, move(distances));
+        tileDistances[static_cast<size_t>(toTileIndex(tile, width))] = move(distances);
     }
     return tileDistances;
 }
 
-
-long long hungarianAssignmentCost(const vector<vector<int>>& costs) {
-    const int n = static_cast<int>(costs.size());
+long long hungarianAssignmentCost(HungarianScratch& scratch, int n, int m) {
     if (n == 0) return 0;
-    const int m = static_cast<int>(costs[0].size());
-    
-    if (n > m) {
-        vector<vector<int>> transposed(
-            static_cast<size_t>(m), vector<int>(static_cast<size_t>(n)));
-        for (int i = 0; i < n; ++i)
-            for (int j = 0; j < m; ++j)
-                transposed[j][i] = costs[i][j];
-        return hungarianAssignmentCost(transposed);
-    }
     constexpr long long INF = numeric_limits<long long>::max() / 4;
-    vector<long long> u(n + 1), v(m + 1);
-    vector<int> p(m + 1), way(m + 1);
+    scratch.prepare(n, m);
+
+    auto& u = scratch.u;
+    auto& v = scratch.v;
+    auto& p = scratch.p;
+    auto& way = scratch.way;
+    auto& minv = scratch.minv;
+    auto& used = scratch.used;
+    const auto& rowPointers = scratch.rowPointers;
+
     for (int i = 1; i <= n; ++i) {
         p[0] = i;
         int j0 = 0;
-        vector<long long> minv(m + 1, INF);
-        vector<bool> used(m + 1);
+        fill(minv.begin(), minv.begin() + m + 1, INF);
+        fill(used.begin(), used.begin() + m + 1, static_cast<uint8_t>(0));
         do {
-            used[j0] = true;
-            int i0 = p[j0];
+            used[static_cast<size_t>(j0)] = 1;
+            int i0 = p[static_cast<size_t>(j0)];
             long long delta = INF;
             int j1 = 0;
+            const int* costsRow = rowPointers[static_cast<size_t>(i0 - 1)];
             for (int j = 1; j <= m; ++j) {
-                if (used[j]) continue;
-                long long cur = static_cast<long long>(costs[i0 - 1][j - 1]) - u[i0] - v[j];
-                if (cur < minv[j]) {
-                    minv[j] = cur;
-                    way[j] = j0;
+                if (used[static_cast<size_t>(j)]) continue;
+                long long cur = static_cast<long long>(costsRow[j - 1]) - u[static_cast<size_t>(i0)] - v[static_cast<size_t>(j)];
+                if (cur < minv[static_cast<size_t>(j)]) {
+                    minv[static_cast<size_t>(j)] = cur;
+                    way[static_cast<size_t>(j)] = j0;
                 }
-                if (minv[j] < delta) {
-                    delta = minv[j];
+                if (minv[static_cast<size_t>(j)] < delta) {
+                    delta = minv[static_cast<size_t>(j)];
                     j1 = j;
                 }
             }
             for (int j = 0; j <= m; ++j) {
-                if (used[j]) {
-                    u[p[j]] += delta;
-                    v[j] -= delta;
+                if (used[static_cast<size_t>(j)]) {
+                    u[static_cast<size_t>(p[static_cast<size_t>(j)])] += delta;
+                    v[static_cast<size_t>(j)] -= delta;
                 } else {
-                    minv[j] -= delta;
+                    minv[static_cast<size_t>(j)] -= delta;
                 }
             }
             j0 = j1;
-        } while (p[j0] != 0);
+        } while (p[static_cast<size_t>(j0)] != 0);
         do {
-            int j1 = way[j0];
-            p[j0] = p[j1];
+            int j1 = way[static_cast<size_t>(j0)];
+            p[static_cast<size_t>(j0)] = p[static_cast<size_t>(j1)];
             j0 = j1;
         } while (j0 != 0);
     }
     long long result = 0;
     for (int j = 1; j <= m; ++j) {
-        if (p[j] != 0) result += costs[p[j] - 1][j - 1];
+        int matchedRow = p[static_cast<size_t>(j)];
+        if (matchedRow != 0) {
+            result += rowPointers[static_cast<size_t>(matchedRow - 1)][j - 1];
+        }
     }
     return result;
 }
 
-int countHotspots(const Boxes& boxCoordinates, const HotspotDictionary& hotspotDictionary) {
+int countHotspots(const Boxes& boxCoordinates, const TileSet& currentBoxesMask,
+                  const HotspotDictionary& hotspotDictionary, int width) {
     int hotspots = 0;
     for (Position box : boxCoordinates) {
-        const TileSet& trapped = hotspotDictionary.at(box);
-        for (Position other : boxCoordinates) {
-            if (contains(trapped, other)) {
-                ++hotspots;
-                break;
-            }
+        const TileSet& trapped = hotspotDictionary[static_cast<size_t>(toTileIndex(box, width))];
+        if (!disjoint(trapped, currentBoxesMask)) {
+            ++hotspots;
         }
     }
     return hotspots;
 }
 
 using HeuristicCache = unordered_map<Boxes, long long, BoxesHash>;
-long long calculateHeuristic(const Boxes& boxCoordinates, const TileDistances& tileDistances,
-                             HeuristicCache& heuristicCache, const HotspotDictionary& hotspotDictionary) {
-    vector<vector<int>> costMatrix;
-    costMatrix.reserve(boxCoordinates.size());
-    for (Position box : boxCoordinates) costMatrix.push_back(tileDistances.at(box));
-    long long heuristic = hungarianAssignmentCost(costMatrix) +
-                          static_cast<long long>(countHotspots(boxCoordinates, hotspotDictionary)) * 10;
+
+long long calculateHeuristic(const Boxes& boxCoordinates, const TileSet& currentBoxesMask,
+                             const TileDistances& tileDistances, HeuristicCache& heuristicCache,
+                             const HotspotDictionary& hotspotDictionary, int width, int numGoals,
+                             HungarianScratch& hungarianScratch) {
+    int n = static_cast<int>(boxCoordinates.size());
+    hungarianScratch.rowPointers.resize(static_cast<size_t>(n));
+    for (int i = 0; i < n; ++i) {
+        int tileIdx = toTileIndex(boxCoordinates[static_cast<size_t>(i)], width);
+        hungarianScratch.rowPointers[static_cast<size_t>(i)] = tileDistances[static_cast<size_t>(tileIdx)].data();
+    }
+    long long assignmentCost = hungarianAssignmentCost(hungarianScratch, n, numGoals);
+    long long heuristic = assignmentCost +
+                          static_cast<long long>(countHotspots(boxCoordinates, currentBoxesMask, hotspotDictionary, width)) * 10;
     heuristicCache[boxCoordinates] = heuristic;
     return heuristic;
 }
 
-TileSet reachablePlayerTiles(Position playerPosition, const Boxes& boxCoordinates,
-                             const Neighbors& neighbors) {
-    vector<Position> frontier = {playerPosition};
-    TileSet reachable = {playerPosition};
-    for (size_t i = 0; i < frontier.size(); ++i) {
-        Position current = frontier[i];
-        for (Position dest : neighbors.at(current)) {
-            if (!contains(reachable, dest) && !contains(boxCoordinates, dest)) {
-                reachable.insert(dest);
-                frontier.push_back(dest);
+TileSet reachablePlayerTiles(Position playerPosition, const TileSet& currentBoxesMask,
+                             const Neighbors& neighbors, int width, int totalTiles,
+                             BfsScratch& scratch) {
+    TileSet reachable(width, totalTiles);
+    reachable.insert(playerPosition);
+    scratch.frontier.clear();
+    scratch.frontier.push_back(playerPosition);
+    for (size_t i = 0; i < scratch.frontier.size(); ++i) {
+        Position current = scratch.frontier[i];
+        int currentIdx = toTileIndex(current, width);
+        for (Position dest : neighbors[static_cast<size_t>(currentIdx)]) {
+            if (!contains(currentBoxesMask, dest) && reachable.insertAndCheck(dest)) {
+                scratch.frontier.push_back(dest);
             }
         }
     }
     return reachable;
 }
 
-pair<TileSet, TileSet> getCorralFromTile(Position startPos, const Boxes& boxCoordinates,
-                                              const Neighbors& neighbors) {
-    vector<Position> frontier = {startPos};
-    TileSet corral = {startPos};
-    TileSet corralBoxes;
-    for (size_t i = 0; i < frontier.size(); ++i) {
-        Position current = frontier[i];
-        for (Position dest : neighbors.at(current)) {
+pair<TileSet, TileSet> getCorralFromTile(Position startPos, const TileSet& currentBoxesMask,
+                                         const Neighbors& neighbors, int width, int totalTiles,
+                                         BfsScratch& scratch) {
+    TileSet corral(width, totalTiles);
+    TileSet corralBoxes(width, totalTiles);
+    corral.insert(startPos);
+    scratch.frontier.clear();
+    scratch.frontier.push_back(startPos);
+    for (size_t i = 0; i < scratch.frontier.size(); ++i) {
+        Position current = scratch.frontier[i];
+        int currentIdx = toTileIndex(current, width);
+        for (Position dest : neighbors[static_cast<size_t>(currentIdx)]) {
             if (contains(corral, dest)) continue;
-            if (contains(boxCoordinates, dest)) {
+            if (contains(currentBoxesMask, dest)) {
                 corralBoxes.insert(dest);
             } else {
                 corral.insert(dest);
-                frontier.push_back(dest);
+                scratch.frontier.push_back(dest);
             }
         }
     }
@@ -374,78 +631,92 @@ pair<TileSet, TileSet> getCorralFromTile(Position startPos, const Boxes& boxCoor
 }
 
 bool isPICorral(const TileSet& corral, const TileSet& corralBoxes,
-                const TileSet& reachable, const Boxes& boxCoordinates,
-                const TileSet& walls, const TileSet& validBoxTiles) {
+                const TileSet& reachable, const TileSet& currentBoxesMask,
+                const TileSet& walls, const TileSet& validBoxTiles,
+                int width, int height) {
     bool hasValidPush = false;
     for (Position box : corralBoxes) {
         for (Position direction : DIRECTION) {
             Position playerPos = box - direction;
             Position boxDest = box + direction;
+            if (playerPos.row < 0 || playerPos.row >= height || playerPos.col < 0 || playerPos.col >= width)
+                continue;
+            if (boxDest.row < 0 || boxDest.row >= height || boxDest.col < 0 || boxDest.col >= width)
+                continue;
             if (contains(walls, playerPos) || !contains(validBoxTiles, boxDest)) continue;
             if (contains(corral, playerPos)) continue;
             if (contains(corralBoxes, playerPos) && contains(corralBoxes, boxDest)) continue;
             if (!contains(corral, boxDest)) return false;
             if (!contains(reachable, playerPos) && !contains(corralBoxes, playerPos)) return false;
-            if (contains(reachable, playerPos) && !contains(boxCoordinates, boxDest)) hasValidPush = true;
+            if (contains(reachable, playerPos) && !contains(currentBoxesMask, boxDest)) hasValidPush = true;
         }
     }
     return hasValidPush;
 }
 
 optional<string> findWalkingPath(Position start, Position destination,
-                                           const Boxes& boxCoordinates, const Neighbors& neighbors) {
+                                 const Boxes& boxCoordinates, const Neighbors& neighbors,
+                                 int width, int totalTiles, BfsScratch& scratch) {
     if (start == destination) return string{};
-    deque<Position> frontier = {start};
-    unordered_map<Position, optional<pair<Position, char>>, PositionHash> parents;
-    parents.emplace(start, nullopt);
-    while (!frontier.empty()) {
-        Position current = frontier.front();
-        frontier.pop_front();
-        for (Position dest : neighbors.at(current)) {
-            if (parents.find(dest) != parents.end() || contains(boxCoordinates, dest)) continue;
+    TileSet boxMask = asTileSet(boxCoordinates, width, totalTiles);
+    int stamp = scratch.nextStamp();
+    int startIdx = toTileIndex(start, width);
+    int destTargetIdx = toTileIndex(destination, width);
+
+    scratch.visitStamp[static_cast<size_t>(startIdx)] = stamp;
+    scratch.parentTile[static_cast<size_t>(startIdx)] = -1;
+    scratch.frontier.clear();
+    scratch.frontier.push_back(start);
+
+    for (size_t i = 0; i < scratch.frontier.size(); ++i) {
+        Position current = scratch.frontier[i];
+        int currentIdx = toTileIndex(current, width);
+        for (Position dest : neighbors[static_cast<size_t>(currentIdx)]) {
+            int nextIdx = toTileIndex(dest, width);
+            if (scratch.visitStamp[static_cast<size_t>(nextIdx)] == stamp || contains(boxMask, dest))
+                continue;
             Position direction = dest - current;
-            parents.emplace(dest, pair{current, directionChar(direction)});
-            if (dest == destination) {
+            scratch.visitStamp[static_cast<size_t>(nextIdx)] = stamp;
+            scratch.parentTile[static_cast<size_t>(nextIdx)] = currentIdx;
+            scratch.parentMove[static_cast<size_t>(nextIdx)] = directionChar(direction);
+            if (nextIdx == destTargetIdx) {
                 string path;
-                while (!(dest == start)) {
-                    const auto& [previous, move] = *parents.at(dest);
-                    path.push_back(move);
-                    dest = previous;
+                int traceIdx = destTargetIdx;
+                while (traceIdx != startIdx) {
+                    path.push_back(scratch.parentMove[static_cast<size_t>(traceIdx)]);
+                    traceIdx = scratch.parentTile[static_cast<size_t>(traceIdx)];
                 }
                 reverse(path.begin(), path.end());
                 return path;
             }
-            frontier.push_back(dest);
+            scratch.frontier.push_back(dest);
         }
     }
     return nullopt;
 }
 
-struct TunnelKey {
-    Position tile;
-    Position direction;
-    bool operator==(const TunnelKey&) const = default;
-};
-struct TunnelKeyHash {
-    size_t operator()(const TunnelKey& k) const {
-        return hashCombine(PositionHash{}(k.tile), PositionHash{}(k.direction));
-    }
-};
-using TunnelSquares = unordered_set<TunnelKey, TunnelKeyHash>;
+using TunnelSquares = vector<array<uint8_t, 4>>;
 
-TunnelSquares detectTunnelSquares(const TileSet& interiorTiles, const Boxes& goalState,
-                                   const TileSet& walls) {
-    TunnelSquares tunnelSquares;
+TunnelSquares detectTunnelSquares(const TileSet& interiorTiles, const TileSet& goalTiles,
+                                  const TileSet& walls, int width, int height, int totalTiles) {
+    TunnelSquares tunnelSquares(static_cast<size_t>(totalTiles), {0, 0, 0, 0});
     for (Position tile : interiorTiles) {
-        for (Position direction : DIRECTION) {
+        int tileIdx = toTileIndex(tile, width);
+        for (int d = 0; d < 4; ++d) {
+            Position direction = DIRECTION[static_cast<size_t>(d)];
             Position prevTile = tile - direction;
+            if (prevTile.row < 0 || prevTile.row >= height || prevTile.col < 0 || prevTile.col >= width)
+                continue;
             Position side = {-direction.col, direction.row};
             Position tileSide1 = tile + side, tileSide2 = tile - side;
             Position prevSide1 = prevTile + side, prevSide2 = prevTile - side;
-            if (contains(interiorTiles, prevTile) && !contains(goalState, tile) &&
-                contains(walls, tileSide1) && contains(walls, tileSide2) &&
-                contains(walls, prevSide1) && contains(walls, prevSide2)) {
-                tunnelSquares.insert(TunnelKey{tile, direction});
+            auto isWallPos = [&](Position p) {
+                return p.row < 0 || p.row >= height || p.col < 0 || p.col >= width || contains(walls, p);
+            };
+            if (contains(interiorTiles, prevTile) && !contains(goalTiles, tile) &&
+                isWallPos(tileSide1) && isWallPos(tileSide2) &&
+                isWallPos(prevSide1) && isWallPos(prevSide2)) {
+                tunnelSquares[static_cast<size_t>(tileIdx)][static_cast<size_t>(d)] = 1;
             }
         }
     }
@@ -455,117 +726,168 @@ TunnelSquares detectTunnelSquares(const TileSet& interiorTiles, const Boxes& goa
 struct PullState {
     Position player;
     Position box;
-    bool operator==(const PullState&) const = default;
-};
-struct PullStateHash {
-    size_t operator()(const PullState& v) const {
-        return hashCombine(PositionHash{}(v.player), PositionHash{}(v.box));
-    }
 };
 
-pair<TileSet, unordered_set<PullState, PullStateHash>>
-getReachableGoalsCount(Position goal, optional<Position> hotspotTile, const Neighbors& neighbors) {
-    vector<PullState> frontier;
-    unordered_set<PullState, PullStateHash> explored;
-    TileSet reached;
-    for (Position dest : neighbors.at(goal)) {
+pair<TileSet, TileSet> getReachableGoalsCount(
+    Position goal, optional<Position> hotspotTile, const Neighbors& neighbors,
+    int width, int totalTiles, vector<PullState>& pullFrontier,
+    vector<int>& pullStamp, int& currentPullStamp) {
+
+    ++currentPullStamp;
+    if (currentPullStamp == numeric_limits<int>::max()) {
+        fill(pullStamp.begin(), pullStamp.end(), 0);
+        currentPullStamp = 1;
+    }
+
+    pullFrontier.clear();
+    TileSet reached(width, totalTiles);
+    TileSet visited(width, totalTiles);
+    int goalIdx = toTileIndex(goal, width);
+
+    for (Position dest : neighbors[static_cast<size_t>(goalIdx)]) {
         if (!hotspotTile || dest != *hotspotTile) {
-            PullState startState = {dest, goal};
-            frontier.push_back(startState);
-            explored.insert(startState);
+            int destIdx = toTileIndex(dest, width);
+            int stateIdx = destIdx * totalTiles + goalIdx;
+            pullStamp[static_cast<size_t>(stateIdx)] = currentPullStamp;
+            pullFrontier.push_back({dest, goal});
         }
     }
-    for (size_t i = 0; i < frontier.size(); ++i) {
-        auto [currentPlayerPos, currentBoxCoords] = frontier[i];
+    for (size_t i = 0; i < pullFrontier.size(); ++i) {
+        auto [currentPlayerPos, currentBoxCoords] = pullFrontier[i];
         reached.insert(currentBoxCoords);
+        visited.insert(currentBoxCoords);
+        visited.insert(currentPlayerPos);
+        int playerIdx = toTileIndex(currentPlayerPos, width);
+        int boxIdx = toTileIndex(currentBoxCoords, width);
+        const auto& playerNeighbors = neighbors[static_cast<size_t>(playerIdx)];
+
         Position delta = currentPlayerPos - currentBoxCoords;
         if (abs(delta.row) + abs(delta.col) == 1) {
             Position dest = currentPlayerPos + delta;
-            if (find(neighbors.at(currentPlayerPos).begin(), neighbors.at(currentPlayerPos).end(), dest) != neighbors.at(currentPlayerPos).end() &&
+            if (find(playerNeighbors.begin(), playerNeighbors.end(), dest) != playerNeighbors.end() &&
                 (!hotspotTile || dest != *hotspotTile)) {
-                PullState newState = {dest, currentPlayerPos};
-                if (explored.insert(newState).second) frontier.push_back(newState);
+                int destIdx = toTileIndex(dest, width);
+                int newStateIdx = destIdx * totalTiles + playerIdx;
+                if (pullStamp[static_cast<size_t>(newStateIdx)] != currentPullStamp) {
+                    pullStamp[static_cast<size_t>(newStateIdx)] = currentPullStamp;
+                    pullFrontier.push_back({dest, currentPlayerPos});
+                }
             }
         }
-        for (Position destination : neighbors.at(currentPlayerPos)) {
+        for (Position destination : playerNeighbors) {
             if (destination != currentBoxCoords && (!hotspotTile || destination != *hotspotTile)) {
-                PullState startState = {destination, currentBoxCoords};
-                if (explored.insert(startState).second) frontier.push_back(startState);
+                int destIdx = toTileIndex(destination, width);
+                int nextStateIdx = destIdx * totalTiles + boxIdx;
+                if (pullStamp[static_cast<size_t>(nextStateIdx)] != currentPullStamp) {
+                    pullStamp[static_cast<size_t>(nextStateIdx)] = currentPullStamp;
+                    pullFrontier.push_back({destination, currentBoxCoords});
+                }
             }
         }
     }
-    return {move(reached), move(explored)};
+    return {move(reached), move(visited)};
 }
 
 pair<TileSet, HotspotDictionary> generateHotspotTable(
-    const Boxes& goalState, const TileSet& interiorTiles, const Neighbors& neighbors) {
-    unordered_map<Position, int, PositionHash> reachableGoalCount;
-    for (Position tile : interiorTiles) reachableGoalCount[tile] = 0;
-    unordered_map<Position, TileSet, PositionHash> goalReached;
-    unordered_map<Position, TileSet, PositionHash> visitedByGoal;
+    const Boxes& goalState, const TileSet& interiorTiles, const Neighbors& neighbors,
+    int width, int totalTiles) {
+    vector<int> reachableGoalCount(static_cast<size_t>(totalTiles), 0);
+    vector<TileSet> goalReached(static_cast<size_t>(totalTiles));
+    vector<TileSet> visitedByGoal(static_cast<size_t>(totalTiles));
+    vector<uint8_t> isGoalTile(static_cast<size_t>(totalTiles), 0);
+
+    vector<PullState> pullFrontier;
+    pullFrontier.reserve(static_cast<size_t>(totalTiles * 4));
+    vector<int> pullStamp(static_cast<size_t>(totalTiles * totalTiles), 0);
+    int currentPullStamp = 0;
 
     for (Position goal : goalState) {
-        auto [reached, explored] = getReachableGoalsCount(goal, nullopt, neighbors);
-        goalReached[goal] = reached;
-        TileSet visited = reached;
-        for (const PullState& state : explored) visited.insert(state.player);
-        visitedByGoal[goal] = move(visited);
-        for (Position tile : reached) ++reachableGoalCount.at(tile);
+        int goalIdx = toTileIndex(goal, width);
+        isGoalTile[static_cast<size_t>(goalIdx)] = 1;
+        auto [reached, visited] = getReachableGoalsCount(
+            goal, nullopt, neighbors, width, totalTiles, pullFrontier, pullStamp, currentPullStamp);
+        for (Position tile : reached) {
+            ++reachableGoalCount[static_cast<size_t>(toTileIndex(tile, width))];
+        }
+        goalReached[static_cast<size_t>(goalIdx)] = move(reached);
+        visitedByGoal[static_cast<size_t>(goalIdx)] = move(visited);
     }
 
-    TileSet validBoxTiles;
-    for (const auto& [tile, count] : reachableGoalCount)
-        if (count > 0) validBoxTiles.insert(tile);
+    TileSet validBoxTiles(width, totalTiles);
+    for (Position tile : interiorTiles) {
+        int tileIdx = toTileIndex(tile, width);
+        if (reachableGoalCount[static_cast<size_t>(tileIdx)] > 0) {
+            validBoxTiles.insertIndex(tileIdx);
+        }
+    }
 
-    HotspotDictionary hotspotDictionary;
-    for (Position tile : interiorTiles) hotspotDictionary.emplace(tile, TileSet{});
+    HotspotDictionary hotspotDictionary(static_cast<size_t>(totalTiles), TileSet(width, totalTiles));
+    vector<int> hotspotGoalCount(static_cast<size_t>(totalTiles), 0);
+
     for (Position hotspotTile : validBoxTiles) {
-        unordered_map<Position, int, PositionHash> hotspotGoalCount;
-        for (Position tile : validBoxTiles) hotspotGoalCount[tile] = 0;
+        int hotspotIdx = toTileIndex(hotspotTile, width);
+        fill(hotspotGoalCount.begin(), hotspotGoalCount.end(), 0);
         for (Position goal : goalState) {
             if (goal == hotspotTile) continue;
+            int goalIdx = toTileIndex(goal, width);
             TileSet reached;
-            if (contains(visitedByGoal.at(goal), hotspotTile)) {
-                reached = getReachableGoalsCount(goal, hotspotTile, neighbors).first;
+            if (contains(visitedByGoal[static_cast<size_t>(goalIdx)], hotspotTile)) {
+                reached = getReachableGoalsCount(
+                    goal, hotspotTile, neighbors, width, totalTiles, pullFrontier, pullStamp, currentPullStamp).first;
             } else {
-                reached = goalReached.at(goal);
+                reached = goalReached[static_cast<size_t>(goalIdx)];
             }
             for (Position tile : reached) {
-                auto it = hotspotGoalCount.find(tile);
-                if (it != hotspotGoalCount.end()) ++it->second;
+                int tileIdx = toTileIndex(tile, width);
+                if (validBoxTiles.containsIndex(tileIdx)) {
+                    ++hotspotGoalCount[static_cast<size_t>(tileIdx)];
+                }
             }
         }
         for (Position tile : validBoxTiles) {
             if (tile == hotspotTile) continue;
-            int expectedCount = reachableGoalCount.at(tile);
-            if (goalReached.find(hotspotTile) != goalReached.end() &&
-                contains(goalReached.at(hotspotTile), tile)) --expectedCount;
-            if (hotspotGoalCount.at(tile) < expectedCount) hotspotDictionary[hotspotTile].insert(tile);
+            int tileIdx = toTileIndex(tile, width);
+            int expectedCount = reachableGoalCount[static_cast<size_t>(tileIdx)];
+            if (isGoalTile[static_cast<size_t>(hotspotIdx)] &&
+                 goalReached[static_cast<size_t>(hotspotIdx)].containsIndex(tileIdx)) {
+                --expectedCount;
+            }
+            if (hotspotGoalCount[static_cast<size_t>(tileIdx)] < expectedCount) {
+                hotspotDictionary[static_cast<size_t>(hotspotIdx)].insertIndex(tileIdx);
+            }
         }
     }
     return {move(validBoxTiles), move(hotspotDictionary)};
 }
 
-int getPackedBoxes(const Boxes& boxCoordinates, const Boxes& goalState) {
+int getPackedBoxes(const Boxes& boxCoordinates, const TileSet& goalTiles) {
     int packed = 0;
-    for (Position box : boxCoordinates) if (contains(goalState, box)) ++packed;
+    for (Position box : boxCoordinates) {
+        if (contains(goalTiles, box)) ++packed;
+    }
     return packed;
 }
 
-int countRegions(const TileSet& interiorTiles, const Boxes& boxes, const Neighbors& neighbors) {
-    TileSet explored;
+int countRegions(const vector<int>& interiorTileIndices, const TileSet& currentBoxesMask,
+                 const vector<vector<int>>& neighborIndices, BfsScratch& scratch) {
+    int stamp = scratch.nextStamp();
     int rooms = 0;
-    for (Position currentPos : interiorTiles) {
-        if (contains(boxes, currentPos) || contains(explored, currentPos)) continue;
+    for (int currentPos : interiorTileIndices) {
+        if (currentBoxesMask.containsIndex(currentPos) ||
+            scratch.visitStamp[static_cast<size_t>(currentPos)] == stamp) {
+            continue;
+        }
         ++rooms;
-        vector<Position> frontier = {currentPos};
-        explored.insert(currentPos);
-        for (size_t i = 0; i < frontier.size(); ++i) {
-            Position current = frontier[i];
-            for (Position dest : neighbors.at(current)) {
-                if (!contains(boxes, dest) && !contains(explored, dest)) {
-                    explored.insert(dest);
-                    frontier.push_back(dest);
+        scratch.indexFrontier.clear();
+        scratch.indexFrontier.push_back(currentPos);
+        scratch.visitStamp[static_cast<size_t>(currentPos)] = stamp;
+        for (size_t i = 0; i < scratch.indexFrontier.size(); ++i) {
+            int current = scratch.indexFrontier[i];
+            for (int dest : neighborIndices[static_cast<size_t>(current)]) {
+                if (!currentBoxesMask.containsIndex(dest) &&
+                    scratch.visitStamp[static_cast<size_t>(dest)] != stamp) {
+                    scratch.visitStamp[static_cast<size_t>(dest)] = stamp;
+                    scratch.indexFrontier.push_back(dest);
                 }
             }
         }
@@ -574,40 +896,45 @@ int countRegions(const TileSet& interiorTiles, const Boxes& boxes, const Neighbo
 }
 
 struct RoomInfo {
-    vector<TileSet> rooms;
-    vector<set<int>> graphIds;
-    unordered_map<Position, int, PositionHash> tileToRoom;
+    vector<vector<int>> rooms;
+    vector<vector<int>> graphIds;
+    vector<int> tileToRoom;
 };
 
-RoomInfo generateRoomsAndGraph(const TileSet& interiorTiles, const Neighbors& neighbors) {
-    TileSet roomTiles;
+RoomInfo generateRoomsAndGraph(const TileSet& interiorTiles, const Neighbors& neighbors,
+                               int width, int totalTiles) {
+    TileSet roomTiles(width, totalTiles);
     for (Position tile : interiorTiles) {
         auto [row, col] = pair{tile.row, tile.col};
         array<Position, 6> twoByThree = {{{row, col}, {row, col + 1}, {row, col + 2},
-                                                {row + 1, col}, {row + 1, col + 1}, {row + 1, col + 2}}};
+                                          {row + 1, col}, {row + 1, col + 1}, {row + 1, col + 2}}};
         array<Position, 6> threeByTwo = {{{row, col}, {row + 1, col}, {row + 2, col},
-                                                {row, col + 1}, {row + 1, col + 1}, {row + 2, col + 1}}};
+                                          {row, col + 1}, {row + 1, col + 1}, {row + 2, col + 1}}};
         bool first = true, second = true;
         for (Position p : twoByThree) if (!contains(interiorTiles, p)) first = false;
         for (Position p : threeByTwo) if (!contains(interiorTiles, p)) second = false;
-        if (first) roomTiles.insert(twoByThree.begin(), twoByThree.end());
-        if (second) roomTiles.insert(threeByTwo.begin(), threeByTwo.end());
+        if (first) for (Position p : twoByThree) roomTiles.insert(p);
+        if (second) for (Position p : threeByTwo) roomTiles.insert(p);
     }
 
     RoomInfo result;
+    result.tileToRoom.assign(static_cast<size_t>(totalTiles), -1);
     while (!roomTiles.empty()) {
-        Position startPos = *roomTiles.begin();
+        Position startPos = roomTiles.firstPosition();
         roomTiles.erase(startPos);
         int roomId = static_cast<int>(result.rooms.size());
-        TileSet currentRoom = {startPos};
+        int startIdx = toTileIndex(startPos, width);
+        vector<int> currentRoom = {startIdx};
         vector<Position> frontier = {startPos};
-        result.tileToRoom[startPos] = roomId;
+        result.tileToRoom[static_cast<size_t>(startIdx)] = roomId;
         for (size_t i = 0; i < frontier.size(); ++i) {
             Position currentPos = frontier[i];
-            for (Position dest : neighbors.at(currentPos)) {
-                if (roomTiles.erase(dest) > 0) {
-                    currentRoom.insert(dest);
-                    result.tileToRoom[dest] = roomId;
+            int currentIdx = toTileIndex(currentPos, width);
+            for (Position dest : neighbors[static_cast<size_t>(currentIdx)]) {
+                if (roomTiles.erase(dest)) {
+                    int destIdx = toTileIndex(dest, width);
+                    currentRoom.push_back(destIdx);
+                    result.tileToRoom[static_cast<size_t>(destIdx)] = roomId;
                     frontier.push_back(dest);
                 }
             }
@@ -615,77 +942,104 @@ RoomInfo generateRoomsAndGraph(const TileSet& interiorTiles, const Neighbors& ne
         result.rooms.push_back(move(currentRoom));
     }
 
-    result.graphIds.resize(result.rooms.size());
+    vector<set<int>> graphSets(result.rooms.size());
     for (size_t roomId = 0; roomId < result.rooms.size(); ++roomId) {
-        vector<Position> frontier(result.rooms[roomId].begin(), result.rooms[roomId].end());
-        TileSet explored = result.rooms[roomId];
+        vector<Position> frontier;
+        TileSet explored(width, totalTiles);
+        for (int tileIdx : result.rooms[roomId]) {
+            Position p = toPosition(tileIdx, width);
+            frontier.push_back(p);
+            explored.insertIndex(tileIdx);
+        }
         for (size_t i = 0; i < frontier.size(); ++i) {
             Position currentPos = frontier[i];
-            for (Position dest : neighbors.at(currentPos)) {
-                if (!explored.insert(dest).second) continue;
-                auto it = result.tileToRoom.find(dest);
-                if (it != result.tileToRoom.end()) {
-                    int neighborRoom = it->second;
-                    result.graphIds[roomId].insert(neighborRoom);
-                    result.graphIds[neighborRoom].insert(static_cast<int>(roomId));
+            int currentIdx = toTileIndex(currentPos, width);
+            for (Position dest : neighbors[static_cast<size_t>(currentIdx)]) {
+                if (!explored.insertAndCheck(dest)) continue;
+                int destIdx = toTileIndex(dest, width);
+                int neighborRoom = result.tileToRoom[static_cast<size_t>(destIdx)];
+                if (neighborRoom != -1) {
+                    graphSets[roomId].insert(neighborRoom);
+                    graphSets[static_cast<size_t>(neighborRoom)].insert(static_cast<int>(roomId));
                 } else {
                     frontier.push_back(dest);
                 }
             }
         }
     }
+    result.graphIds.resize(result.rooms.size());
+    for (size_t roomId = 0; roomId < result.rooms.size(); ++roomId) {
+        result.graphIds[roomId].assign(graphSets[roomId].begin(), graphSets[roomId].end());
+    }
     return result;
 }
 
-int countRoomConnectivity(const Boxes& boxes, const RoomInfo& roomInfo,
-                          const Neighbors& neighbors) {
+int countRoomConnectivity(const TileSet& currentBoxesMask, const RoomInfo& roomInfo,
+                          const vector<vector<int>>& neighborIndices, BfsScratch& scratch,
+                          vector<uint8_t>& connectedRoomsMask) {
     int brokenEdges = 0;
     for (size_t roomId = 0; roomId < roomInfo.rooms.size(); ++roomId) {
         const auto& roomTiles = roomInfo.rooms[roomId];
         const auto& adjRoomIds = roomInfo.graphIds[roomId];
         if (adjRoomIds.empty()) continue;
-        TileSet explored;
-        set<int> connectedRooms;
-        for (Position startPos : roomTiles) {
-            if (contains(boxes, startPos) || contains(explored, startPos)) continue;
-            vector<Position> frontier = {startPos};
-            explored.insert(startPos);
-            for (size_t i = 0; i < frontier.size(); ++i) {
-                Position currentPos = frontier[i];
-                for (Position dest : neighbors.at(currentPos)) {
-                    if (contains(boxes, dest) || contains(explored, dest)) continue;
-                    explored.insert(dest);
-                    if (auto it = roomInfo.tileToRoom.find(dest); it != roomInfo.tileToRoom.end()) {
-                        int neighborRoom = it->second;
-                        if (neighborRoom == static_cast<int>(roomId)) frontier.push_back(dest);
-                        else connectedRooms.insert(neighborRoom);
+
+        int stamp = scratch.nextStamp();
+        fill(connectedRoomsMask.begin(), connectedRoomsMask.end(), 0);
+        size_t connectedCount = 0;
+
+        for (int startPos : roomTiles) {
+            if (currentBoxesMask.containsIndex(startPos) ||
+                scratch.visitStamp[static_cast<size_t>(startPos)] == stamp) {
+                continue;
+            }
+            scratch.indexFrontier.clear();
+            scratch.indexFrontier.push_back(startPos);
+            scratch.visitStamp[static_cast<size_t>(startPos)] = stamp;
+            for (size_t i = 0; i < scratch.indexFrontier.size(); ++i) {
+                int currentPos = scratch.indexFrontier[i];
+                for (int dest : neighborIndices[static_cast<size_t>(currentPos)]) {
+                    if (currentBoxesMask.containsIndex(dest) ||
+                        scratch.visitStamp[static_cast<size_t>(dest)] == stamp) {
+                        continue;
+                    }
+                    scratch.visitStamp[static_cast<size_t>(dest)] = stamp;
+                    int neighborRoom = roomInfo.tileToRoom[static_cast<size_t>(dest)];
+                    if (neighborRoom != -1) {
+                        if (neighborRoom == static_cast<int>(roomId)) {
+                            scratch.indexFrontier.push_back(dest);
+                        } else if (!connectedRoomsMask[static_cast<size_t>(neighborRoom)]) {
+                            connectedRoomsMask[static_cast<size_t>(neighborRoom)] = 1;
+                            ++connectedCount;
+                        }
                     } else {
-                        frontier.push_back(dest);
+                        scratch.indexFrontier.push_back(dest);
                     }
                 }
             }
-            if (connectedRooms.size() == adjRoomIds.size()) break;
+            if (connectedCount == adjRoomIds.size()) break;
         }
         for (int neighborRoom : adjRoomIds) {
             if (static_cast<int>(roomId) < neighborRoom &&
-                connectedRooms.find(neighborRoom) == connectedRooms.end()) ++brokenEdges;
+                !connectedRoomsMask[static_cast<size_t>(neighborRoom)]) {
+                ++brokenEdges;
+            }
         }
     }
     return brokenEdges;
 }
 
 int countMobility(const Boxes& boxCoordinates, const TileSet& reachable,
-                  const Neighbors& neighbors) {
+                  const Neighbors& neighbors, int width) {
     int mobility = 0;
     for (Position box : boxCoordinates) {
-        for (Position dest : neighbors.at(box)) {
+        int boxIdx = toTileIndex(box, width);
+        for (Position dest : neighbors[static_cast<size_t>(boxIdx)]) {
             if (contains(reachable, dest)) ++mobility;
         }
     }
     return mobility;
 }
 
-using FeatureSpace = array<int, 3>;
 pair<FeatureSpace, FeatureSpace> getProjectedFeatureSpace(
     const FeatureSpace& rawFeatureSpace, const FeatureSpace& bestAncestorFeatureSpace) {
     if (rawFeatureSpace < bestAncestorFeatureSpace) return {rawFeatureSpace, rawFeatureSpace};
@@ -696,18 +1050,20 @@ struct HeapEntry {
     long long heuristic;
     long long negativeMobility;
     long long negativeCounter;
-    State key;
+    int stateId;
 };
+
 struct HeapCompare {
     bool operator()(const HeapEntry& a, const HeapEntry& b) const {
         return tie(a.heuristic, a.negativeMobility, a.negativeCounter) >
                tie(b.heuristic, b.negativeMobility, b.negativeCounter);
     }
 };
+
 using FeatureHeap = priority_queue<HeapEntry, vector<HeapEntry>, HeapCompare>;
 
 struct MacroNode {
-    State parent;
+    int parentStateId;
     Position currentBox;
     Boxes boxes;
     TileSet reachable;
@@ -716,187 +1072,249 @@ struct MacroNode {
 }
 
 string SokoBot::solveSokobanPuzzle(int width, int height, const vector<string>& mapData, const vector<string>& itemsData) {
+    int totalTiles = width * height;
+    BfsScratch bfsScratch(totalTiles);
+    HungarianScratch hungarianScratch;
+
     Boxes goalState;
     for (int row = 0; row < static_cast<int>(mapData.size()); ++row) {
-        for (int col = 0; col < static_cast<int>(mapData[row].size()); ++col) {
-            if (mapData[row][col] == '.') goalState.push_back({row, col});
+        for (int col = 0; col < static_cast<int>(mapData[static_cast<size_t>(row)].size()); ++col) {
+            if (mapData[static_cast<size_t>(row)][static_cast<size_t>(col)] == '.')
+                goalState.push_back({row, col});
         }
     }
     goalState = canonicalBoxes(move(goalState));
-    const TileSet goalTiles = asTileSet(goalState);
+    const int numGoals = static_cast<int>(goalState.size());
+    const TileSet goalTiles = asTileSet(goalState, width, totalTiles);
 
     Boxes boxCoordinates;
     Position playerPosition{};
     for (int row = 0; row < static_cast<int>(itemsData.size()); ++row) {
-        for (int col = 0; col < static_cast<int>(itemsData[row].size()); ++col) {
-            if (itemsData[row][col] == '$') boxCoordinates.push_back({row, col});
-            else if (itemsData[row][col] == '@') playerPosition = {row, col};
+        for (int col = 0; col < static_cast<int>(itemsData[static_cast<size_t>(row)].size()); ++col) {
+            char ch = itemsData[static_cast<size_t>(row)][static_cast<size_t>(col)];
+            if (ch == '$') boxCoordinates.push_back({row, col});
+            else if (ch == '@') playerPosition = {row, col};
         }
     }
     boxCoordinates = canonicalBoxes(move(boxCoordinates));
 
-    TileSet walls;
-    for (int row = 0; row < height; ++row)
-        for (int col = 0; col < width; ++col)
-            if (mapData.at(row).at(col) == '#') walls.insert({row, col});
+    TileSet walls(width, totalTiles);
+    for (int row = 0; row < height; ++row) {
+        for (int col = 0; col < width; ++col) {
+            if (mapData[static_cast<size_t>(row)][static_cast<size_t>(col)] == '#') {
+                walls.insert({row, col});
+            }
+        }
+    }
 
-    Neighbors neighbors;
+    Neighbors neighbors(static_cast<size_t>(totalTiles));
+    vector<vector<int>> neighborIndices(static_cast<size_t>(totalTiles));
     for (int row = 0; row < height; ++row) {
         for (int col = 0; col < width; ++col) {
             Position tile{row, col};
             if (contains(walls, tile)) continue;
+            int tileIdx = toTileIndex(tile, width);
             vector<Position> tileNeighbors;
+            vector<int> tileNeighborIndices;
             for (Position d : DIRECTION) {
                 Position dest = tile + d;
                 if (dest.row >= 0 && dest.row < height && dest.col >= 0 && dest.col < width &&
-                    !contains(walls, dest)) tileNeighbors.push_back(dest);
+                    !contains(walls, dest)) {
+                    tileNeighbors.push_back(dest);
+                    tileNeighborIndices.push_back(toTileIndex(dest, width));
+                }
             }
-            neighbors.emplace(tile, move(tileNeighbors));
+            neighbors[static_cast<size_t>(tileIdx)] = move(tileNeighbors);
+            neighborIndices[static_cast<size_t>(tileIdx)] = move(tileNeighborIndices);
         }
     }
 
-    TileSet interiorTiles = reachablePlayerTiles(playerPosition, Boxes{}, neighbors);
-    auto [validBoxTiles, hotspotDictionary] = generateHotspotTable(goalState, interiorTiles, neighbors);
-    DistanceMatrices distances = generateDistanceMatrices(goalState, height, width, validBoxTiles, neighbors);
-    TileDistances tileDistances = buildDistanceStack(distances, goalState, validBoxTiles);
-    FreezeSubset freezeSubset;
-    RoomInfo roomInfo = generateRoomsAndGraph(interiorTiles, neighbors);
+    TileSet emptyBoxesMask(width, totalTiles);
+    TileSet interiorTiles = reachablePlayerTiles(playerPosition, emptyBoxesMask, neighbors, width, totalTiles, bfsScratch);
+    vector<int> interiorTileIndices;
+    for (Position tile : interiorTiles) {
+        interiorTileIndices.push_back(toTileIndex(tile, width));
+    }
+
+    auto [validBoxTiles, hotspotDictionary] = generateHotspotTable(goalState, interiorTiles, neighbors, width, totalTiles);
+    DistanceMatrices distances = generateDistanceMatrices(goalState, height, width, validBoxTiles, neighbors, bfsScratch);
+    TileDistances tileDistances = buildDistanceStack(distances, goalState, validBoxTiles, width, totalTiles);
+    FreezeSubset freezeSubset(static_cast<size_t>(totalTiles));
+    RoomInfo roomInfo = generateRoomsAndGraph(interiorTiles, neighbors, width, totalTiles);
+    vector<uint8_t> connectedRoomsMask(roomInfo.rooms.size(), 0);
     HeuristicCache heuristicCache;
     unordered_map<Boxes, FeatureSpace, BoxesHash> featureSpaceCache;
-    TileSet startReachable = reachablePlayerTiles(playerPosition, boxCoordinates, neighbors);
-    TunnelSquares tunnelTiles = detectTunnelSquares(interiorTiles, goalState, walls);
 
-    auto getFeatureSpace = [&](const Boxes& boxes) -> FeatureSpace {
+    TileSet startBoxesMask = asTileSet(boxCoordinates, width, totalTiles);
+    TileSet startReachable = reachablePlayerTiles(playerPosition, startBoxesMask, neighbors, width, totalTiles, bfsScratch);
+    TunnelSquares tunnelTiles = detectTunnelSquares(interiorTiles, goalTiles, walls, width, height, totalTiles);
+
+    auto getFeatureSpace = [&](const Boxes& boxes, const TileSet& boxesMask) -> FeatureSpace {
         if (auto it = featureSpaceCache.find(boxes); it != featureSpaceCache.end()) return it->second;
-        int packed = getPackedBoxes(boxes, goalState);
-        int connectivity = countRegions(interiorTiles, boxes, neighbors);
-        int roomConnectivity = countRoomConnectivity(boxes, roomInfo, neighbors);
+        int packed = getPackedBoxes(boxes, goalTiles);
+        int connectivity = countRegions(interiorTileIndices, boxesMask, neighborIndices, bfsScratch);
+        int roomConnectivity = countRoomConnectivity(boxesMask, roomInfo, neighborIndices, bfsScratch, connectedRoomsMask);
         FeatureSpace rawFeatureSpace = {-packed, connectivity, roomConnectivity};
         featureSpaceCache[boxes] = rawFeatureSpace;
         return rawFeatureSpace;
     };
 
     State startKey{playerPosition, boxCoordinates};
-    unordered_map<State, TileSet, StateHash> stateByKey;
-    stateByKey.emplace(startKey, startReachable);
-    unordered_map<State, optional<Parent>, StateHash> parents;
-    parents.emplace(startKey, nullopt);
+    FeatureSpace startFeatureSpace = getFeatureSpace(boxCoordinates, startBoxesMask);
+    long long heuristic = calculateHeuristic(
+        boxCoordinates, startBoxesMask, tileDistances, heuristicCache, hotspotDictionary, width, numGoals, hungarianScratch);
+    int mobility = countMobility(boxCoordinates, startReachable, neighbors, width);
+
+    vector<StateRecord> statePool;
+    statePool.reserve(65536);
+    statePool.push_back(StateRecord{
+        startKey,
+        startReachable,
+        startFeatureSpace,
+        Parent{-1, Position{}, Position{}, 0}
+    });
+
     unordered_map<Boxes, vector<TileSet>, BoxesHash> exploredReigons;
     exploredReigons[boxCoordinates].push_back(startReachable);
 
     map<FeatureSpace, FeatureHeap> featureSpaceQueues;
-    list<FeatureSpace> featureOrder;
     long long stateCounter = 0;
-    FeatureSpace startFeatureSpace = getFeatureSpace(boxCoordinates);
-    unordered_map<State, FeatureSpace, StateHash> bestAncestorFeatureSpace;
-    bestAncestorFeatureSpace[startKey] = startFeatureSpace;
-    long long heuristic = calculateHeuristic(boxCoordinates, tileDistances, heuristicCache, hotspotDictionary);
-    int mobility = countMobility(boxCoordinates, startReachable, neighbors);
-    featureSpaceQueues[startFeatureSpace].push({heuristic, -mobility, -stateCounter, startKey});
-    featureOrder.push_back(startFeatureSpace);
+    featureSpaceQueues[startFeatureSpace].push({heuristic, -mobility, -stateCounter, 0});
     ++stateCounter;
 
+    vector<uint8_t> freezeState(static_cast<size_t>(totalTiles), 0);
+    vector<int> touchedFreezeTiles;
+    touchedFreezeTiles.reserve(static_cast<size_t>(totalTiles));
+    vector<Position> frozenBoxes;
+    frozenBoxes.reserve(goalState.size());
+    vector<Position> boxesToExplore;
+    boxesToExplore.reserve(boxCoordinates.size());
+    vector<Position> corralSeeds;
+    corralSeeds.reserve(boxCoordinates.size() * 4);
+    vector<MacroNode> macroFrontier;
+
     while (!featureSpaceQueues.empty()) {
-        vector<FeatureSpace> snapshot(featureOrder.begin(), featureOrder.end());
-        for (FeatureSpace featureSpaceKey : snapshot) {
-            auto heapIt = featureSpaceQueues.find(featureSpaceKey);
-            if (heapIt == featureSpaceQueues.end()) continue;
+        for (auto heapIt = featureSpaceQueues.begin(); heapIt != featureSpaceQueues.end(); ) {
             if (heapIt->second.empty()) {
-                featureSpaceQueues.erase(heapIt);
-                featureOrder.remove(featureSpaceKey);
+                heapIt = featureSpaceQueues.erase(heapIt);
                 continue;
             }
             HeapEntry entry = heapIt->second.top();
             heapIt->second.pop();
             if (heapIt->second.empty()) {
-                featureSpaceQueues.erase(heapIt);
-                featureOrder.remove(featureSpaceKey);
+                heapIt = featureSpaceQueues.erase(heapIt);
+            } else {
+                ++heapIt;
             }
 
-            State currentKey = move(entry.key);
-            const Boxes& currentBoxCoords = currentKey.boxes;
-            auto stateIt = stateByKey.find(currentKey);
-            if (stateIt == stateByKey.end()) throw logic_error("Missing state reachable region");
-            TileSet reachable = move(stateIt->second);
-            stateByKey.erase(stateIt);
-            FeatureSpace currentBestAncestor = bestAncestorFeatureSpace.at(currentKey);
+            int currentStateId = entry.stateId;
+            Boxes currentBoxCoords = statePool[static_cast<size_t>(currentStateId)].stateKey.boxes;
+            TileSet reachable = move(statePool[static_cast<size_t>(currentStateId)].reachable);
+            statePool[static_cast<size_t>(currentStateId)].reachable = TileSet{};
+            FeatureSpace currentBestAncestor = statePool[static_cast<size_t>(currentStateId)].bestAncestor;
 
             if (currentBoxCoords == goalState) {
                 vector<Parent> transitions;
-                State key = currentKey;
-                while (parents.at(key).has_value()) {
-                    Parent transition = *parents.at(key);
+                int traceStateId = currentStateId;
+                while (statePool[static_cast<size_t>(traceStateId)].parent.previousStateId != -1) {
+                    const Parent& transition = statePool[static_cast<size_t>(traceStateId)].parent;
                     transitions.push_back(transition);
-                    key = transition.previousKey;
+                    traceStateId = transition.previousStateId;
                 }
                 reverse(transitions.begin(), transitions.end());
                 string winPath;
                 for (const Parent& transition : transitions) {
+                    const State& prevState = statePool[static_cast<size_t>(transition.previousStateId)].stateKey;
                     optional<string> walk = findWalkingPath(
-                        transition.previousKey.player, transition.standingTile,
-                        transition.previousKey.boxes, neighbors);
+                        prevState.player, transition.standingTile,
+                        prevState.boxes, neighbors, width, totalTiles, bfsScratch);
                     if (!walk) throw runtime_error("Invalid reconstructed push path");
                     winPath += *walk;
                     winPath.append(static_cast<size_t>(transition.pushCount),
                                    directionChar(transition.pushDirection));
                 }
-                cout << "Total states explored: " << parents.size() << '\n';
+                cout << "Total states explored: " << statePool.size() << '\n';
                 cout << "Total unique box configurations explored: " << exploredReigons.size() << '\n';
                 return winPath;
             }
 
-            TileSet boxesToExplore = asTileSet(currentBoxCoords);
-            TileSet exploredCorral;
-            TileSet corralSeeds;
+            TileSet currentBoxesMask = asTileSet(currentBoxCoords, width, totalTiles);
+            boxesToExplore = currentBoxCoords;
+            TileSet exploredCorral(width, totalTiles);
+            TileSet corralSeedMask(width, totalTiles);
+            corralSeeds.clear();
+
             for (Position box : currentBoxCoords) {
                 for (Position direction : DIRECTION) {
                     Position standingTile = box - direction;
                     Position boxDestination = box + direction;
+                    if (standingTile.row < 0 || standingTile.row >= height ||
+                        standingTile.col < 0 || standingTile.col >= width) continue;
+                    if (boxDestination.row < 0 || boxDestination.row >= height ||
+                        boxDestination.col < 0 || boxDestination.col >= width) continue;
                     if (contains(reachable, standingTile) && contains(validBoxTiles, boxDestination)) {
-                        if (!contains(reachable, boxDestination) && !contains(currentBoxCoords, boxDestination))
-                            corralSeeds.insert(boxDestination);
+                        if (!contains(reachable, boxDestination) && !contains(currentBoxesMask, boxDestination)) {
+                            if (corralSeedMask.insertAndCheck(boxDestination)) {
+                                corralSeeds.push_back(boxDestination);
+                            }
+                        }
                     }
                 }
             }
+
             for (Position currentPos : corralSeeds) {
                 if (contains(exploredCorral, currentPos)) continue;
-                auto [corral, corralBoxes] = getCorralFromTile(currentPos, currentBoxCoords, neighbors);
-                exploredCorral.insert(corral.begin(), corral.end());
-                if (corralBoxes.empty() || corralBoxes.size() == currentBoxCoords.size()) continue;
+                auto [corral, corralBoxes] = getCorralFromTile(
+                    currentPos, currentBoxesMask, neighbors, width, totalTiles, bfsScratch);
+                exploredCorral.insertAll(corral);
+                size_t corralBoxCount = corralBoxes.size();
+                if (corralBoxCount == 0 || corralBoxCount == currentBoxCoords.size()) continue;
                 if (subsetOf(corralBoxes, goalTiles) && disjoint(corral, goalTiles)) continue;
-                if (isPICorral(corral, corralBoxes, reachable, currentBoxCoords, walls, validBoxTiles)) {
-                    boxesToExplore = move(corralBoxes);
+                if (isPICorral(corral, corralBoxes, reachable, currentBoxesMask, walls, validBoxTiles, width, height)) {
+                    boxesToExplore.clear();
+                    for (Position cb : corralBoxes) boxesToExplore.push_back(cb);
                     break;
                 }
             }
 
             for (Position box : boxesToExplore) {
-                vector<MacroNode> macroFrontier = {{currentKey, box, currentBoxCoords, reachable}};
+                macroFrontier.clear();
+                macroFrontier.push_back({currentStateId, box, currentBoxCoords, reachable});
                 for (size_t macroIndex = 0; macroIndex < macroFrontier.size(); ++macroIndex) {
-                    MacroNode macroNode = move(macroFrontier[macroIndex]);
-                    const State& macroParentKey = macroNode.parent;
-                    Position currentBox = macroNode.currentBox;
-                    const Boxes& macroBoxCoords = macroNode.boxes;
-                    const TileSet& macroReachable = macroNode.reachable;
-                    for (Position direction : DIRECTION) {
+                    int macroParentId = macroFrontier[macroIndex].parentStateId;
+                    Position currentBox = macroFrontier[macroIndex].currentBox;
+                    Boxes macroBoxCoords = move(macroFrontier[macroIndex].boxes);
+                    TileSet macroReachable = move(macroFrontier[macroIndex].reachable);
+                    TileSet macroBoxesMask = asTileSet(macroBoxCoords, width, totalTiles);
+
+                    for (int d = 0; d < 4; ++d) {
+                        Position direction = DIRECTION[static_cast<size_t>(d)];
                         Position standingTile = currentBox - direction;
+                        if (standingTile.row < 0 || standingTile.row >= height ||
+                            standingTile.col < 0 || standingTile.col >= width) continue;
                         if (!contains(macroReachable, standingTile)) continue;
+
                         Position boxDestination = currentBox + direction;
-                        if (!contains(validBoxTiles, boxDestination) || contains(macroBoxCoords, boxDestination))
+                        if (boxDestination.row < 0 || boxDestination.row >= height ||
+                            boxDestination.col < 0 || boxDestination.col >= width) continue;
+                        if (!contains(validBoxTiles, boxDestination) || contains(macroBoxesMask, boxDestination))
                             continue;
+
                         Position newPlayerPos = currentBox;
-                        Position pushDirection = direction;
                         int pushCount = 1;
                         Position movingBox = boxDestination;
-                        while (tunnelTiles.find(TunnelKey{movingBox, pushDirection}) != tunnelTiles.end()) {
+                        while (tunnelTiles[static_cast<size_t>(toTileIndex(movingBox, width))][static_cast<size_t>(d)] != 0) {
                             Position nextBox = movingBox + direction;
-                            if (!contains(validBoxTiles, nextBox) || contains(macroBoxCoords, nextBox)) break;
+                            if (nextBox.row < 0 || nextBox.row >= height ||
+                                nextBox.col < 0 || nextBox.col >= width) break;
+                            if (!contains(validBoxTiles, nextBox) || contains(macroBoxesMask, nextBox)) break;
                             newPlayerPos = movingBox;
                             movingBox = nextBox;
                             ++pushCount;
                         }
                         boxDestination = movingBox;
                         Boxes newBoxCoords = pushedBoxes(macroBoxCoords, currentBox, boxDestination);
+
                         bool alreadyExplored = false;
                         if (auto it = exploredReigons.find(newBoxCoords); it != exploredReigons.end()) {
                             for (const TileSet& exploredRegion : it->second) {
@@ -908,55 +1326,67 @@ string SokoBot::solveSokobanPuzzle(int width, int height, const vector<string>& 
                         }
                         if (alreadyExplored) continue;
 
+                        TileSet newBoxesMask = macroBoxesMask;
+                        newBoxesMask.erase(currentBox);
+                        newBoxesMask.insert(boxDestination);
+
                         long long newHeuristic;
                         if (auto it = heuristicCache.find(newBoxCoords); it != heuristicCache.end()) {
                             newHeuristic = it->second;
                         } else {
-                            if (hasFreezeSubset(boxDestination, newBoxCoords, freezeSubset)) continue;
-                            unordered_map<Position, bool, PositionHash> freezeExplored;
-                            TileSet exploring;
-                            optional<TileSet> frozenBoxes = detectBlockedAxes(
-                                boxDestination, validBoxTiles, walls, freezeExplored, newBoxCoords, exploring);
+                            if (hasFreezeSubset(boxDestination, newBoxCoords, freezeSubset, width)) continue;
+                            bool isBoxFrozen = detectBlockedAxes(
+                                boxDestination, validBoxTiles, walls, newBoxesMask,
+                                width, height, freezeState, touchedFreezeTiles, frozenBoxes);
                             bool nonGoalFrozen = false;
-                            if (frozenBoxes) {
-                                for (Position b : *frozenBoxes) {
-                                    if (!contains(goalState, b)) {
+                            if (isBoxFrozen) {
+                                for (Position b : frozenBoxes) {
+                                    if (!contains(goalTiles, b)) {
                                         nonGoalFrozen = true;
                                         break;
                                     }
                                 }
                             }
                             if (nonGoalFrozen) {
-                                if (frozenBoxes->size() <= 4) {
-                                    Boxes frozenPattern = canonicalBoxes(Boxes(frozenBoxes->begin(), frozenBoxes->end()));
-                                    for (Position frozenBox : frozenPattern)
-                                        freezeSubset[frozenBox].insert(frozenPattern);
+                                if (frozenBoxes.size() <= 4) {
+                                    Boxes frozenPattern = canonicalBoxes(frozenBoxes);
+                                    for (Position frozenBox : frozenPattern) {
+                                        auto& patternList = freezeSubset[static_cast<size_t>(toTileIndex(frozenBox, width))];
+                                        if (find(patternList.begin(), patternList.end(), frozenPattern) == patternList.end()) {
+                                            patternList.push_back(frozenPattern);
+                                        }
+                                    }
                                 }
+                                heuristicCache[newBoxCoords] = 999999;
                                 continue;
                             }
-                            newHeuristic = calculateHeuristic(newBoxCoords, tileDistances,
-                                                              heuristicCache, hotspotDictionary);
+                            newHeuristic = calculateHeuristic(
+                                newBoxCoords, newBoxesMask, tileDistances,
+                                heuristicCache, hotspotDictionary, width, numGoals, hungarianScratch);
                         }
                         if (newHeuristic >= 999999) continue;
 
-                        TileSet newReachable = reachablePlayerTiles(newPlayerPos, newBoxCoords, neighbors);
+                        TileSet newReachable = reachablePlayerTiles(
+                            newPlayerPos, newBoxesMask, neighbors, width, totalTiles, bfsScratch);
                         exploredReigons[newBoxCoords].push_back(newReachable);
-                        State newKey{newPlayerPos, newBoxCoords};
-                        parents[newKey] = Parent{macroParentKey, standingTile, direction, pushCount};
-                        stateByKey[newKey] = newReachable;
 
-                        FeatureSpace rawFeatureSpace = getFeatureSpace(newBoxCoords);
+                        FeatureSpace rawFeatureSpace = getFeatureSpace(newBoxCoords, newBoxesMask);
                         auto [projectedFeatureSpace, newBestAncestor] =
                             getProjectedFeatureSpace(rawFeatureSpace, currentBestAncestor);
-                        bestAncestorFeatureSpace[newKey] = newBestAncestor;
-                        int newMobility = countMobility(newBoxCoords, newReachable, neighbors);
+                        int newMobility = countMobility(newBoxCoords, newReachable, neighbors, width);
 
-                        if (featureSpaceQueues.find(projectedFeatureSpace) == featureSpaceQueues.end())
-                            featureOrder.push_back(projectedFeatureSpace);
+                        int newStateId = static_cast<int>(statePool.size());
+                        statePool.push_back(StateRecord{
+                            State{newPlayerPos, newBoxCoords},
+                            newReachable,
+                            newBestAncestor,
+                            Parent{macroParentId, standingTile, direction, pushCount}
+                        });
+
                         featureSpaceQueues[projectedFeatureSpace].push(
-                            {newHeuristic, -newMobility, -stateCounter, newKey});
+                            {newHeuristic, -newMobility, -stateCounter, newStateId});
                         ++stateCounter;
-                        macroFrontier.push_back({newKey, boxDestination, newBoxCoords, move(newReachable)});
+                        macroFrontier.push_back({newStateId, boxDestination, move(newBoxCoords), move(newReachable)});
                     }
                 }
             }
@@ -964,20 +1394,43 @@ string SokoBot::solveSokobanPuzzle(int width, int height, const vector<string>& 
     }
     return "";
 }
+
+static string lastSolution;
+
+extern "C" {
+#ifdef _WIN32
+__declspec(dllexport)
+#endif
+const char* solve_puzzle_c(int width, int height, const char* mapFlat, const char* itemsFlat, double timeLimit) {
+    (void)timeLimit;
+    vector<string> mapData(static_cast<size_t>(height), string(static_cast<size_t>(width), ' '));
+    vector<string> itemsData(static_cast<size_t>(height), string(static_cast<size_t>(width), ' '));
+    for (int row = 0; row < height; ++row) {
+        for (int col = 0; col < width; ++col) {
+            mapData[static_cast<size_t>(row)][static_cast<size_t>(col)] = mapFlat[row * width + col];
+            itemsData[static_cast<size_t>(row)][static_cast<size_t>(col)] = itemsFlat[row * width + col];
+        }
+    }
+    SokoBot solver;
+    lastSolution = solver.solveSokobanPuzzle(width, height, mapData, itemsData);
+    return lastSolution.c_str();
+}
+}
+
 int main() {
     int width, height;
-    cin >> width >> height;
+    if (!(cin >> width >> height)) return 0;
     cin.ignore(numeric_limits<streamsize>::max(), '\n');
 
-    vector<string> mapData(height);
-    vector<string> itemsData(height);
+    vector<string> mapData(static_cast<size_t>(height));
+    vector<string> itemsData(static_cast<size_t>(height));
 
     for (int i = 0; i < height; i++) {
-        getline(cin, mapData[i]);
+        getline(cin, mapData[static_cast<size_t>(i)]);
     }
 
     for (int i = 0; i < height; i++) {
-        getline(cin, itemsData[i]);
+        getline(cin, itemsData[static_cast<size_t>(i)]);
     }
 
     SokoBot solver;

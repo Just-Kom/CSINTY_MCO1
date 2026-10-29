@@ -9,7 +9,7 @@ class SokoBot:
         self.solverDir = Path(__file__).resolve().parent
         self.cppPath = self.solverDir / "sokobot.cpp"
         self.dllPath = self.solverDir / "sokobot_cpp.dll"
-        self.exePath = self.solverDir / "sokobot_cpp"
+        self.exePath = self.solverDir / "sokobot_cpp.exe"
         self.cppLib = None
         self._loadSolver()
 
@@ -32,7 +32,7 @@ class SokoBot:
 
         if not self.exePath.exists() and self.cppPath.exists():
             subprocess.run(
-                ["g++", "-O3", "-std=c++14", "-static", str(self.cppPath), "-o", str(self.exePath)],
+                ["g++", "-O3", "-std=c++20", "-static", str(self.cppPath), "-o", str(self.exePath)],
                 check=False
             )
 

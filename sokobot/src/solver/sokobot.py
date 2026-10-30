@@ -1,5 +1,6 @@
 import ctypes
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -51,24 +52,33 @@ class SokoBot:
         self.cppPath = self.solverDir / "sokobot.cpp"
         self.hppPath = self.solverDir / "sokobot.hpp"
 
-        # Same names as before. Both files are built as shared libraries
-        # (-shared) and loaded in-process; the .exe on Windows is really a DLL.
+        # Built as a shared library (-shared) and loaded in-process.
+        # Windows uses .dll: Windows refuses to load a library that is
+        # named .exe, so that name cannot work with ctypes.
         if sys.platform == "win32":
-            self.libraryPath = self.solverDir / "sokobot_cpp.exe"
+            self.libraryPath = self.solverDir / "sokobot_cpp.dll"
         elif sys.platform.startswith("linux") or sys.platform == "darwin":
             self.libraryPath = self.solverDir / "sokobot_cpp.so"
         else:
             raise RuntimeError("Unsupported operating system")
 
         self.cppLib = None
+        self.errors = []
         self._loadSolver()
 
     def _tryLoad(self, path):
         try:
+            # Python 3.8+ on Windows no longer searches PATH for a DLL's
+            # dependencies, so let it look next to g++ (MinGW runtime DLLs).
+            if sys.platform == "win32":
+                gpp = shutil.which("g++")
+                if gpp and hasattr(os, "add_dll_directory"):
+                    os.add_dll_directory(str(Path(gpp).resolve().parent))
             lib = ctypes.CDLL(str(path))
             getattr(lib, "solve_puzzle_c")
             return lib
-        except (OSError, AttributeError):
+        except (OSError, AttributeError) as e:
+            self.errors.append(f"load {path}: {e}")
             return None
 
     def _compile(self, outPath):
@@ -76,14 +86,21 @@ class SokoBot:
             bridge = Path(temp_dir) / "sokobot_bridge.cpp"
             bridge.write_text(_BRIDGE, encoding="utf-8")
             command = ["g++", "-O3", "-std=c++20", "-shared"]
-            if sys.platform != "win32":
+            if sys.platform == "win32":
+                # Bundle the MinGW runtime so the DLL has no other dependencies.
+                command += ["-static", "-static-libgcc", "-static-libstdc++"]
+            else:
                 command.append("-fPIC")
             command += [
                 "-I", str(self.solverDir),
                 str(self.cppPath), str(bridge),
                 "-o", str(outPath),
             ]
-            subprocess.run(command, cwd=self.solverDir, check=True)
+            proc = subprocess.run(
+                command, cwd=self.solverDir, capture_output=True, text=True
+            )
+            if proc.returncode != 0:
+                raise RuntimeError(f"g++ failed:\n{proc.stderr}")
 
     def _loadSolver(self):
         if not self.cppPath.is_file() or not self.hppPath.is_file():
@@ -104,7 +121,8 @@ class SokoBot:
             try:
                 self._compile(self.libraryPath)
                 self.cppLib = self._tryLoad(self.libraryPath)
-            except (OSError, subprocess.CalledProcessError):
+            except (OSError, RuntimeError) as e:
+                self.errors.append(f"compile in {self.solverDir}: {e}")
                 self.cppLib = None
 
             # Fallback: if the folder is read-only (or the build there failed),
@@ -112,11 +130,17 @@ class SokoBot:
             if self.cppLib is None:
                 fallbackDir = Path(tempfile.mkdtemp(prefix="sokobot_lib_"))
                 fallbackPath = fallbackDir / self.libraryPath.name
-                self._compile(fallbackPath)
-                self.cppLib = self._tryLoad(fallbackPath)
+                try:
+                    self._compile(fallbackPath)
+                    self.cppLib = self._tryLoad(fallbackPath)
+                except (OSError, RuntimeError) as e:
+                    self.errors.append(f"compile in {fallbackDir}: {e}")
 
         if self.cppLib is None:
-            raise RuntimeError("Could not build or load the C++ solver library")
+            raise RuntimeError(
+                "Could not build or load the C++ solver library:\n"
+                + "\n".join(self.errors)
+            )
 
         self.cppLib.solve_puzzle_c.argtypes = [
             ctypes.c_int, ctypes.c_int, ctypes.c_char_p, ctypes.c_char_p, ctypes.c_double

@@ -14,18 +14,15 @@ class SokoBot:
             self.exePath = self.solverDir / "sokobot_cpp"
         else:
             raise RuntimeError("Unsupported operating system")
-
         self._ensureCompiled()
 
+
     def _ensureCompiled(self):
+        if self.exePath.is_file():
+            return
+
         if not self.cppPath.exists():
             raise FileNotFoundError(f"C++ source not found: {self.cppPath}")
-
-        # Recompile if the binary is missing or older than the source files
-        sources = [self.cppPath, self.solverDir / "sokobot.hpp"]
-        newest = max(p.stat().st_mtime for p in sources if p.exists())
-        if self.exePath.is_file() and self.exePath.stat().st_mtime >= newest:
-            return
 
         command = [
             "g++", "-O3", "-std=c++20",

@@ -7,8 +7,6 @@ import tempfile
 from pathlib import Path
 
 
-# C bridge compiled together with sokobot.cpp. It exposes a plain C function
-# that ctypes can call, so no separate process is ever launched.
 _BRIDGE = r'''
 #include "sokobot.hpp"
 #include <string>
@@ -52,9 +50,6 @@ class SokoBot:
         self.cppPath = self.solverDir / "sokobot.cpp"
         self.hppPath = self.solverDir / "sokobot.hpp"
 
-        # Built as a shared library (-shared) and loaded in-process.
-        # Windows uses .dll: Windows refuses to load a library that is
-        # named .exe, so that name cannot work with ctypes.
         if sys.platform == "win32":
             self.libraryPath = self.solverDir / "sokobot_cpp.dll"
         elif sys.platform.startswith("linux") or sys.platform == "darwin":
@@ -68,8 +63,6 @@ class SokoBot:
 
     def _tryLoad(self, path):
         try:
-            # Python 3.8+ on Windows no longer searches PATH for a DLL's
-            # dependencies, so let it look next to g++ (MinGW runtime DLLs).
             if sys.platform == "win32":
                 gpp = shutil.which("g++")
                 if gpp and hasattr(os, "add_dll_directory"):
@@ -87,7 +80,6 @@ class SokoBot:
             bridge.write_text(_BRIDGE, encoding="utf-8")
             command = ["g++", "-O3", "-std=c++20", "-shared"]
             if sys.platform == "win32":
-                # Bundle the MinGW runtime so the DLL has no other dependencies.
                 command += ["-static", "-static-libgcc", "-static-libstdc++"]
             else:
                 command.append("-fPIC")
@@ -108,10 +100,7 @@ class SokoBot:
                 "Both sokobot.cpp and sokobot.hpp must be in " + str(self.solverDir)
             )
 
-        # Reuse the existing library only if it is newer than the sources
-        # AND actually loads as a shared library with our function in it.
-        # An old standalone executable with the same name fails this check
-        # and triggers a rebuild.
+
         if self.libraryPath.exists():
             sourcesTime = max(self.cppPath.stat().st_mtime, self.hppPath.stat().st_mtime)
             if self.libraryPath.stat().st_mtime >= sourcesTime:
@@ -125,8 +114,7 @@ class SokoBot:
                 self.errors.append(f"compile in {self.solverDir}: {e}")
                 self.cppLib = None
 
-            # Fallback: if the folder is read-only (or the build there failed),
-            # build into a temp folder instead.
+
             if self.cppLib is None:
                 fallbackDir = Path(tempfile.mkdtemp(prefix="sokobot_lib_"))
                 fallbackPath = fallbackDir / self.libraryPath.name

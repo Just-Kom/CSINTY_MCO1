@@ -1,99 +1,98 @@
 import ctypes
-import os
 import subprocess
 import sys
-import tempfile
 from pathlib import Path
-
-
-
-_BRIDGE = r'''
-#include "sokobot.hpp"
-#include <string>
-#include <vector>
-#include <exception>
-
-extern "C" const char* solve_puzzle_c(int width, int height,
-                                       const char* map_flat,
-                                       const char* items_flat,
-                                       double /*time_limit*/) {
-    static thread_local std::string result;
-    try {
-        if (width <= 0 || height <= 0 || !map_flat || !items_flat) {
-            result.clear();
-            return result.c_str();
-        }
-        std::vector<std::string> map_data, items_data;
-        map_data.reserve(height);
-        items_data.reserve(height);
-        for (int row = 0; row < height; ++row) {
-            map_data.emplace_back(map_flat + static_cast<size_t>(row) * width,
-                                  static_cast<size_t>(width));
-            items_data.emplace_back(items_flat + static_cast<size_t>(row) * width,
-                                    static_cast<size_t>(width));
-        }
-        SokoBot solver;
-        result = solver.solveSokobanPuzzle(width, height, map_data, items_data);
-    } catch (const std::exception&) {
-        result.clear();
-    } catch (...) {
-        result.clear();
-    }
-    return result.c_str();
-}
-'''
 
 
 class SokoBot:
     def __init__(self):
         self.solverDir = Path(__file__).resolve().parent
         self.cppPath = self.solverDir / "sokobot.cpp"
-        self.hppPath = self.solverDir / "sokobot.hpp"
-        self.libraryPath = self.solverDir / (
-            "sokobot_cpp.dll" if sys.platform == "win32" else "sokobot_cpp.so"
-        )
+
+        self.isWindows = sys.platform == "win32"
+        self.isLinux = sys.platform.startswith("linux")
+
+        if self.isWindows:
+            self.libraryPath = self.solverDir / "sokobot_cpp.exe"
+        elif self.isLinux:
+            self.libraryPath = self.solverDir / "sokobot_cpp.so"
+        else:
+            raise RuntimeError("Unsupported operating system")
+
         self.cppLib = None
         self._loadSolver()
 
-    def _loadSolver(self):
-        if not self.cppPath.is_file() or not self.hppPath.is_file():
-            raise FileNotFoundError("Both sokobot.cpp and sokobot.hpp must be in " + str(self.solverDir))
+    def _compileSolver(self):
+        if not self.cppPath.exists():
+            raise FileNotFoundError(
+                f"C++ source not found: {self.cppPath}"
+            )
 
-        needsCompile = (
-            not self.libraryPath.exists()
-            or max(self.cppPath.stat().st_mtime, self.hppPath.stat().st_mtime)
-            > self.libraryPath.stat().st_mtime
+        if self.isWindows:
+            command = [
+                "g++",
+                "-O3",
+                "-std=c++20",
+                str(self.cppPath),
+                "-o",
+                str(self.libraryPath)
+            ]
+        else:
+            command = [
+                "g++",
+                "-O3",
+                "-std=c++20",
+                "-shared",
+                "-fPIC",
+                str(self.cppPath),
+                "-o",
+                str(self.libraryPath)
+            ]
+
+        print(f"Compiling C++ for {sys.platform}...")
+        subprocess.run(
+            command,
+            cwd=self.solverDir,
+            check=True
         )
-        if not needsCompile:
-            try:
-                lib = ctypes.CDLL(str(self.libraryPath))
-                getattr(lib, "solve_puzzle_c")
-            except (OSError, AttributeError):
-                needsCompile = True
 
-        if needsCompile:
-            with tempfile.TemporaryDirectory(prefix="sokobot_bridge_") as temp_dir:
-                bridge = Path(temp_dir) / "sokobot_bridge.cpp"
-                bridge.write_text(_BRIDGE, encoding="utf-8")
-                command = ["g++", "-O3", "-std=c++20", "-shared"]
-                if sys.platform != "win32":
-                    command.append("-fPIC")
-                command += [
-                    "-I", str(self.solverDir),
-                    str(self.cppPath), str(bridge),
-                    "-o", str(self.libraryPath),
-                ]
-                subprocess.run(command, cwd=self.solverDir, check=True)
+    def _loadSolver(self):
+        if not self.libraryPath.is_file():
+            self._compileSolver()
 
-        self.cppLib = ctypes.CDLL(str(self.libraryPath))
-        self.cppLib.solve_puzzle_c.argtypes = [
-            ctypes.c_int, ctypes.c_int, ctypes.c_char_p, ctypes.c_char_p, ctypes.c_double
-        ]
-        self.cppLib.solve_puzzle_c.restype = ctypes.c_char_p
+        if self.isLinux:
+            self.cppLib = ctypes.CDLL(str(self.libraryPath))
+            self.cppLib.solve_puzzle_c.argtypes = [
+                ctypes.c_char_p,
+                ctypes.POINTER(ctypes.c_char),
+                ctypes.c_size_t
+            ]
+            self.cppLib.solve_puzzle_c.restype = ctypes.c_int
 
     def solveSokobanPuzzle(self, width, height, mapData, itemsData):
-        timeLimit = float(os.environ.get("SOKOBOT_TIME_LIMIT", "0.0"))
-        mapFlat = "".join("".join(row[:width]).ljust(width) for row in mapData[:height]).encode("ascii")
-        itemsFlat = "".join("".join(row[:width]).ljust(width) for row in itemsData[:height]).encode("ascii")
-        result = self.cppLib.solve_puzzle_c(width, height, mapFlat, itemsFlat, timeLimit)
-        return result.decode("ascii") if result else ""
+        mapLines = ["".join(row) for row in mapData]
+        itemLines = ["".join(row) for row in itemsData]
+        puzzle = "\n".join(
+            [f"{width} {height}"] + mapLines + itemLines
+        ) + "\n"
+
+        if self.isWindows:
+            result = subprocess.run(
+                [str(self.libraryPath)],
+                input=puzzle,
+                text=True,
+                capture_output=True,
+                cwd=self.solverDir,
+                check=True
+            )
+
+            for line in result.stdout.splitlines():
+                if line.startswith("SOLUTION:"):
+                    return line.split("SOLUTION:", 1)[1].strip()
+
+            raise RuntimeError("C++ solver did not return a solution")
+
+        else:
+            raise NotImplementedError(
+                "Linux requires a C-compatible function exported from the .so"
+            )
